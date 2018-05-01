@@ -13,6 +13,7 @@
 package com.snowplowanalytics.manifest
 package dynamodb
 
+import scala.collection.convert.decorateAsScala._
 import scala.collection.convert.decorateAsJava._
 import scala.language.higherKinds
 import scala.util.control.NonFatal
@@ -53,23 +54,35 @@ class DynamoDbManifest[F[_]](val client: AmazonDynamoDB,
     * Turn raw `Record` elements into DynamoDB `DbItem`.
     * Can be overloaded by subclasses
     */
-  protected[dynamodb] def newRecord(itemId: ItemId,
-                                    app: Application,
-                                    recordId: UUID,
-                                    previousRecordId: Option[UUID],
-                                    state: State,
-                                    time: Instant,
-                                    author: Author,
-                                    payload: Option[Payload]): DbItem = {
+  protected[dynamodb] def createRecord(itemId: ItemId,
+                                       app: Application,
+                                       recordId: UUID,
+                                       previousRecordId: Option[UUID],
+                                       state: State,
+                                       time: Instant,
+                                       author: Author,
+                                       payload: Option[Payload]): DbRecord = {
 
-    val dataMap = payload.map(dataToAttribute)
-    val previousRecordMap = previousRecordId.map(uuid => Map(PreviousRecordId -> new AttributeValue().withS(uuid.toString)))
+    val dataMap = payload
+      .map(dataToAttribute)
+      .getOrElse(Map.empty)
+    val previousRecordMap = previousRecordId
+      .map(uuid => Map(PreviousRecordId -> new AttributeValue().withS(uuid.toString)))
+      .getOrElse(Map.empty)
+    val instanceIdMap = app
+      .instanceId
+      .map(id => Map(ApplicationInstanceIdKey -> new AttributeValue().withS(id)))
+      .getOrElse(Map.empty)
+
     val item = Map(
-      ItemIdKey -> new AttributeValue().withS(itemId),
-      AppStateKey -> new AttributeValue().withS(appState(app, recordId, state)),
-      TimestampKey -> new AttributeValue().withN(time.toEpochMilli.toString),
-      AuthorKey -> new AttributeValue().withS(showAuthor(author))
-    ) ++ dataMap.getOrElse(Map.empty) ++ previousRecordMap.getOrElse(Map.empty)
+      ItemIdKey             -> new AttributeValue().withS(itemId),
+      ApplicationNameKey    -> new AttributeValue().withS(app.name),
+      ApplicationVersionKey -> new AttributeValue().withS(app.version),
+      RecordIdKey           -> new AttributeValue().withS(recordId.toString),
+      StateKey              -> new AttributeValue().withS(state.show),
+      TimestampKey          -> new AttributeValue().withN(time.toEpochMilli.toString),
+      AuthorKey             -> new AttributeValue().withS(showAuthor(author))
+    ) ++ dataMap ++ previousRecordMap ++ instanceIdMap
 
     item.asJava
   }
@@ -82,28 +95,11 @@ class DynamoDbManifest[F[_]](val client: AmazonDynamoDB,
     } yield records
   }
 
-  def getItem(id: String): F[Option[Item]] = {
-    val attributeValues = List(new AttributeValue().withS(id)).asJava
-    val condition = new Condition()
-      .withComparisonOperator(ComparisonOperator.EQ)
-      .withAttributeValueList(attributeValues)
-    val req = new QueryRequest(primaryTable)
-      .withConsistentRead(true)
-      .withKeyConditions(Map(ItemIdKey -> condition).asJava)
-    val request = Eval.always(req)
-
-    val response = Common.query[F](client, request)
-
+  def getItem(id: String): F[Option[Item]] =
     for {
-      result <- response
-      item <- result match {
-        case Nil => none[Item].pure[F]
-        case h :: t =>
-          val records: F[NonEmptyList[Record]] = NonEmptyList(h, t).traverse[F, Record](parse(_).foldF)
-          records.flatMap(Item(_).ensure[F](resolver)).map(_.some)
-      }
+      records <- getItemRecords(id)
+      item <-  NonEmptyList.fromList(records).map(Item(_).ensure[F](resolver)).sequence
     } yield item
-  }
 
   def put(itemId: ItemId,
           app: Application,
@@ -118,19 +114,63 @@ class DynamoDbManifest[F[_]](val client: AmazonDynamoDB,
       case Some(a) => Author(a, Version)
       case None => Author(app.agent, Version)
     }
-    val item = newRecord(itemId, app, recordId, previousRecordId, state, time, realAuthor, payload)
+    val dbRecord = createRecord(itemId, app, recordId, previousRecordId, state, time, realAuthor, payload)
+    addRecord(recordId, time, dbRecord)
+  }
 
+  /** Low-level item accessor */
+  def getItemRecords(itemId: ItemId): F[List[Record]] = {
+    val attributeValues = List(new AttributeValue().withS(itemId)).asJava
+    val condition = new Condition()
+      .withComparisonOperator(ComparisonOperator.EQ)
+      .withAttributeValueList(attributeValues)
+    val req = new QueryRequest(primaryTable)
+      .withConsistentRead(true)
+      .withKeyConditions(Map(ItemIdKey -> condition).asJava)
+    val request = Eval.always(req)
+
+    val response = Common.query[F](client, request)
+
+    for {
+      result <- response
+      records <- result.traverse[F, Record](parse(_).foldF)
+    } yield records
+  }
+
+  /** Delete record from manifest (DynamoDB-specific API) */
+  def deleteRecord(record: Record): F[Unit] = {
+    try {
+      val dbItem = createRecord(record.itemId, record.application, record.recordId, record.previousRecordId, record.state, record.timestamp, record.author, None)
+        .asScala
+        .filterKeys(k => k == Common.ItemIdKey || k == Common.RecordIdKey).asJava
+      val _ = client.deleteItem(primaryTable, dbItem)
+      ().pure[F]
+    } catch {
+      case NonFatal(e) =>
+        val message = s"DynamoDB Run manifest error: Cannot delete record ${record.recordId}. ${Option(e.getMessage).getOrElse("no error message")}"
+        val error: ManifestError = IoError(message)
+        error.raiseError[F, Unit]
+    }
+  }
+
+  /** Add exact same record to manifest (low-level DynamoDB-specific API) */
+  def putRecord(r: Record): F[(UUID, Instant)] = {
+    val dbItem = createRecord(r.itemId, r.application, r.recordId, r.previousRecordId, r.state, r.timestamp, r.author, r.payload)
+    addRecord(r.recordId, r.timestamp, dbItem)
+  }
+
+  private[manifest] def addRecord(recordId: UUID, time: Instant, dbItem: DbRecord): F[(UUID, Instant)] = {
     val request = new PutItemRequest()
       .withTableName(primaryTable)
-      .withConditionExpression(s"attribute_not_exists($ItemIdKey) AND attribute_not_exists($AppStateKey)")
-      .withItem(item)
+      .withConditionExpression(s"attribute_not_exists($ItemIdKey) AND attribute_not_exists($RecordIdKey)")
+      .withItem(dbItem)
 
     try {
       val _ = client.putItem(request)
       (recordId, time).pure[F]
     } catch {
       case _: ConditionalCheckFailedException =>
-        parseError(s"Record with id:app:state triple already exists. Cannot write $item").raiseError[F, (UUID, Instant)]
+        parseError(s"Record with id:app:state triple already exists. Cannot write $dbItem").raiseError[F, (UUID, Instant)]
       case NonFatal(e) =>
         val message = s"DynamoDB Run manifest error: ${Option(e.getMessage).getOrElse("no error message")}"
         val error: ManifestError = IoError(message)
@@ -141,6 +181,15 @@ class DynamoDbManifest[F[_]](val client: AmazonDynamoDB,
   /** Helper method to flatten `Either` (e.g. in case of parse-error) */
   private[manifest] implicit class FoldFOp[A](either: Either[ManifestError, A]) {
     def foldF: F[A] = either.fold(_.raiseError[F, A], _.pure[F])
+  }
+
+  def query(application: Application): F[Set[ItemId]] = {
+    val req = notProcessedRequest(application)
+    val query = Eval.always(req)
+    for {
+      records <- Common.query[F](client, query)
+      itemIds <- records.traverse[F, ItemId](parseItemId(_).foldF)
+    } yield itemIds.toSet
   }
 }
 
@@ -157,10 +206,10 @@ object DynamoDbManifest {
   def create[F[_]: ManifestAction](client: AmazonDynamoDB, tableName: String): F[Unit] = {
     val pks = List(
       new AttributeDefinition(ItemIdKey, ScalarAttributeType.S),
-      new AttributeDefinition(AppStateKey, ScalarAttributeType.S))
+      new AttributeDefinition(RecordIdKey, ScalarAttributeType.S))
     val schema = List(
       new KeySchemaElement(ItemIdKey, KeyType.HASH),
-      new KeySchemaElement(AppStateKey, KeyType.RANGE))
+      new KeySchemaElement(RecordIdKey, KeyType.RANGE))
 
     val request = new CreateTableRequest()
       .withTableName(tableName)

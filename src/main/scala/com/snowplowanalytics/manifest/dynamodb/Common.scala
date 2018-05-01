@@ -15,6 +15,7 @@ package dynamodb
 
 import scala.annotation.tailrec
 import scala.collection.convert.decorateAsScala._
+import scala.collection.convert.decorateAsJava._
 import scala.language.higherKinds
 import scala.util.control.NonFatal
 
@@ -27,17 +28,21 @@ import com.amazonaws.services.dynamodbv2.AmazonDynamoDB
 import com.amazonaws.services.dynamodbv2.model._
 
 import core.ProcessingManifest._
-import core.ManifestError
 import core.ManifestError._
+import core.{ Application, State, ManifestError }
 
 object Common {
 
   /** Raw DynamoDB record representation */
-  type DbItem = JMap[String, AttributeValue]
+  type DbRecord = JMap[String, AttributeValue]
 
   // Primary table
   private[dynamodb] val ItemIdKey = "ItemId"
-  private[dynamodb] val AppStateKey = "AppState"
+  private[dynamodb] val ApplicationNameKey = "AppName"
+  private[dynamodb] val ApplicationVersionKey = "AppVer"
+  private[dynamodb] val ApplicationInstanceIdKey = "InstanceId"
+  private[dynamodb] val RecordIdKey = "Id"
+  private[dynamodb] val StateKey = "RState"   // "State is reserved word in DynamoDB
   private[dynamodb] val TimestampKey = "Timestamp"
   private[dynamodb] val PreviousRecordId = "PreviousRecordId"
   private[dynamodb] val DataKey = "Data"
@@ -63,7 +68,7 @@ object Common {
     }
   }
 
-  def scan[F[_]: ManifestAction](client: AmazonDynamoDB, req: Eval[ScanRequest]): F[List[DbItem]] = {
+  def scan[F[_]: ManifestAction](client: AmazonDynamoDB, req: Eval[ScanRequest]): F[List[DbRecord]] = {
     val scanResult = try {
       val firstResponse = client.scan(req.value)
       val initAcc = firstResponse.getItems.asScala.toList
@@ -71,7 +76,7 @@ object Common {
     } catch {
       case NonFatal(e) =>
         val error: ManifestError = IoError(e.getMessage)
-        error.raiseError[F, List[DbItem]]
+        error.raiseError[F, List[DbRecord]]
     }
 
     scanResult
@@ -79,8 +84,8 @@ object Common {
 
   @tailrec def goScan(client: AmazonDynamoDB,
                       last: ScanResult,
-                      acc: List[DbItem],
-                      request: Eval[ScanRequest]): List[DbItem] = {
+                      acc: List[DbRecord],
+                      request: Eval[ScanRequest]): List[DbRecord] = {
     Option(last.getLastEvaluatedKey) match {
       case Some(key) =>
         val req = request.value.withExclusiveStartKey(key).withConsistentRead(true)
@@ -93,7 +98,7 @@ object Common {
 
   private[dynamodb] def query[F[_]](client: AmazonDynamoDB,
                                     req: Eval[QueryRequest])
-                                   (implicit F: MonadError[F, ManifestError]): F[List[DbItem]] = {
+                                   (implicit F: MonadError[F, ManifestError]): F[List[DbRecord]] = {
     val queryResult = try {
       val firstResponse = client.query(req.value)
       val initAcc = firstResponse.getItems.asScala.toList
@@ -101,7 +106,7 @@ object Common {
     } catch {
       case NonFatal(e) =>
         val error: ManifestError = IoError(e.getMessage)
-        error.raiseError[F, List[DbItem]]
+        error.raiseError[F, List[DbRecord]]
     }
 
     queryResult
@@ -109,8 +114,8 @@ object Common {
 
   @tailrec private def goQuery(client: AmazonDynamoDB,
                                last: QueryResult,
-                               acc: List[DbItem],
-                               request: Eval[QueryRequest]): List[DbItem] = {
+                               acc: List[DbRecord],
+                               request: Eval[QueryRequest]): List[DbRecord] = {
     Option(last.getLastEvaluatedKey) match {
       case Some(key) =>
         val req = request.value.withExclusiveStartKey(key).withConsistentRead(true)
@@ -118,6 +123,31 @@ object Common {
         val items = response.getItems
         goQuery(client, response, items.asScala.toList ++ acc, request)
       case None => acc
+    }
+  }
+
+  /** Create DynamoDB request to get item ids without PROCESSED:Application records (EXPERIMENTAL) */
+  def notProcessedRequest(application: Application): QueryRequest = {
+    val original = new QueryRequest().withAttributesToGet(ItemIdKey)
+
+    val attributeValues = Map(
+      ":processed" -> new AttributeValue((State.Processed: State).show),
+      ":new" -> new AttributeValue((State.New: State).show),
+      ":appName" -> new AttributeValue(application.name))
+
+    application.instanceId match {
+      case Some(id) =>
+        val updated = attributeValues ++ Map(":instanceId" -> new AttributeValue(id))
+        original
+          .withKeyConditionExpression(s"$StateKey = :processed or $StateKey = :new")
+          .withFilterExpression(s"$ApplicationNameKey <> :appName")
+          .withFilterExpression(s"$ApplicationInstanceIdKey <> :instanceId")
+          .withExpressionAttributeValues(updated.asJava)
+      case None =>
+        original
+          .withKeyConditionExpression(s"$StateKey = :processed or $StateKey = :new")
+          .withFilterExpression(s"$ApplicationNameKey <> :appName")
+          .withExpressionAttributeValues(attributeValues.asJava)
     }
   }
 }

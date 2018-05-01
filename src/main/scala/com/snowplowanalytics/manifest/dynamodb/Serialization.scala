@@ -32,7 +32,7 @@ object Serialization {
   import Common._
 
   /** Transform DynamoDB record into processing manifest record */
-  def parse(dbItem: DbItem): Either[ManifestError, Record] = {
+  def parse(dbItem: DbRecord): Either[ManifestError, Record] = {
     val map = dbItem.asScala
 
     def getS(key: String): Either[String, String] = for {
@@ -40,7 +40,7 @@ object Serialization {
       str <- foldO(Option(value.getS), s"Key $key is not a string")
     } yield str
 
-    def getPreviousRecordId = (for { value <- map.get(PreviousRecordId); str <- Option(value.getS).map(parseId) } yield str).sequence
+    def getPreviousRecordId = (for { value <- map.get(PreviousRecordId); str <- Option(value.getS).map(parseId) } yield str).sequence.toValidatedNel
 
     def getT(key: String): Either[String, Instant] = for {
       value <- foldO(map.get(key), s"Key $key does not exist")
@@ -59,16 +59,14 @@ object Serialization {
 
     if (map.isEmpty) { parseError("DynamoDB record does not contain any payload").asLeft } else {
       val id = getS(ItemIdKey).toValidatedNel
-      val appState: ValidatedNel[String, (Application, State, UUID)] =
-        getS(AppStateKey).toValidatedNel.andThen(v => v.split(quote(Separator.toString), -1).toList match {
-          case List(appName, appVersion, instanceId, state, uuid) =>
-            (State.parse(state).toValidatedNel, parseId(uuid).toValidatedNel).mapN { (state, recordId) =>
-              (Application(Agent(appName, appVersion), expand(instanceId)), state, recordId)
-            }
-          case _ =>
-            val format = s"appName${Separator}appVersion${Separator}instanceId${Separator}state${Separator}uuid"
-            s"Value of $AppStateKey key [$v] does not conform $format format".asLeft.toValidatedNel
-        })
+      val application: ValidatedNel[String, Application] =
+        (getS(ApplicationNameKey).toValidatedNel,
+          getS(ApplicationVersionKey).toValidatedNel,
+          getS(ApplicationInstanceIdKey).toOption.flatMap(expand).validNel).mapN {
+          case (name, version, instanceId) => Application(Agent(name, version), instanceId)
+        }
+      val recordId = getS(RecordIdKey).flatMap(parseId).toValidatedNel
+      val state: ValidatedNel[String, State] = getS(StateKey).flatMap(State.parse).toValidatedNel
       val author: ValidatedNel[String, Author] =
         getS(AuthorKey).toValidatedNel.andThen(v => v.split(quote(Separator.toString), -1).toList match {
           case List(name, version, manifestVersion) => Author(Agent(name, version), manifestVersion).validNel
@@ -76,37 +74,15 @@ object Serialization {
         })
       val timestamp = getT(TimestampKey).toValidatedNel
       val data = getData.toValidatedNel
-      val validated = (id, appState, getPreviousRecordId.toValidatedNel, timestamp, author, data).mapN(toRecord)
+      val validated = (id, application, recordId, getPreviousRecordId, state, timestamp, author, data).mapN(Record.apply)
       validated.toEither.leftMap { errors =>
         parseError(s"Cannot parse manifest record from DynamoDB due following errors: ${errors.toList.mkString(", ")}")
       }
     }
   }
 
-  /** Construct `Record` from just extracted DynamoDB attributes */
-  private def toRecord(itemId: String,
-                       appState: (Application, State, UUID),
-                       previousRecordId: Option[UUID],
-                       timestamp: Instant,
-                       author: Author,
-                       data: Option[Payload]): Record = {
-    val (app, state, recordId) = appState
-    Record(itemId, app, recordId, previousRecordId, state, timestamp, author, data)
-  }
-
   private[dynamodb] def showAuthor(author: Author): String =
     s"${author.agent.name}$Separator${author.agent.version}$Separator${author.manifestVersion}"
-
-  /** Merge app and state into DynamoDB-compatible single column */
-  private[dynamodb] def appState(app: Application, id: UUID, state: State): String =
-    s"${showApplication(app)}$Separator${showState(id, state)}"
-
-  def showApplication(app: Application): String =
-    s"${app.name}$Separator${app.version}$Separator${app.instanceId.getOrElse("")}"
-
-  def showRecord(record: Record): String =
-    s"+ ${showApplication(record.application)} ${showState(record.recordId, record.state)} " +
-      s"${record.timestamp} ${showAuthor(record.author)} ${record.payload.map(_.toString).getOrElse("")}"
 
   def parseId(s: String): Either[String, UUID] =
     try {
@@ -115,8 +91,14 @@ object Serialization {
       case _: IllegalArgumentException => s"UUID [$s] has invalid format".asLeft
     }
 
-  def showState(id: UUID, state: State): String =
-    s"${state.show}$Separator$id"
+  def parseItemId(dbRecord: DbRecord): Either[ManifestError, String] = {
+    def getS(key: String): Either[String, String] = for {
+      value <- foldO(dbRecord.asScala.get(key), s"Key $key does not exist")
+      str <- foldO(Option(value.getS), s"Key $key is not a string")
+    } yield str
+
+    getS(ItemIdKey).leftMap(parseError)
+  }
 
   private def expand(s: String): Option[String] = if (s.isEmpty) None else Some(s)
 }

@@ -163,7 +163,7 @@ class ProcessingManifestSpec extends Specification { def is = s2"""
 
   def e3 = {
     val app = Application("discoverer", "0.1.0")
-    val author = Author(app.agent, "0.1.0-M3")
+    val author = Author(app.agent, ProcessingManifestSpec.AssetVersion)
     val data = parse("""{"message": "no-exception", "programmingLanguage": "SCALA"}""").toOption.get
     val payload = SelfDescribingData(
       SchemaKey("com.snowplowanalytics.snowplow", "application_error", "jsonschema", SchemaVer.Full(1,0,2)),
@@ -194,7 +194,7 @@ class ProcessingManifestSpec extends Specification { def is = s2"""
 
   def e6 = {
     val app = Application("discoverer", "0.1.0")
-    val author = Author(app.agent, "0.1.0-M3")
+    val author = Author(app.agent, ProcessingManifestSpec.AssetVersion)
     val data = parse("""{"message": "no-exception", "programmingLanguage": "SCALA"}""").toOption.get
     val payload = SelfDescribingData(
       SchemaKey("com.snowplowanalytics.snowplow", "application_error", "jsonschema", SchemaVer.Full(1,0,2)),
@@ -226,7 +226,7 @@ class ProcessingManifestSpec extends Specification { def is = s2"""
 
   def e7 = {
     val app = Application("discoverer", "0.1.0")
-    val author = Author(app.agent, "0.1.0-M3")
+    val author = Author(app.agent, ProcessingManifestSpec.AssetVersion)
     val data = parse("""{"message": "no-exception", "programmingLanguage": "SCALA"}""").toOption.get
     val payload = SelfDescribingData(
       SchemaKey("com.snowplowanalytics.snowplow", "application_error", "jsonschema", SchemaVer.Full(1,0,2)),
@@ -269,6 +269,8 @@ class ProcessingManifestSpec extends Specification { def is = s2"""
 object ProcessingManifestSpec {
 
   type F[A] = Either[ManifestError, A]
+
+  val AssetVersion: String = "0.1.0-M4"
 
   case class StaticManifest(records: List[Record]) extends ProcessingManifest[F](SpecHelpers.igluCentralResolver) {
 
