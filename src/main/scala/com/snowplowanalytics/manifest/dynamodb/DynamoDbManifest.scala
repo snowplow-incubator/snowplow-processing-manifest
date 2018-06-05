@@ -22,15 +22,17 @@ import java.time.Instant
 import java.util.UUID
 
 import com.amazonaws.services.dynamodbv2.AmazonDynamoDB
-import com.amazonaws.services.dynamodbv2.model.{Record => _, _}
+import com.amazonaws.services.dynamodbv2.model.{Record => _, Stream => _, _}
 import com.amazonaws.services.dynamodbv2.document.Table
 
 import cats._
 import cats.data.NonEmptyList
 import cats.implicits._
+import cats.effect._
+
+import fs2._
 
 import com.snowplowanalytics.iglu.client.Resolver
-
 import com.snowplowanalytics.iglu.core.circe.implicits._
 
 import core._
@@ -87,14 +89,6 @@ class DynamoDbManifest[F[_]](val client: AmazonDynamoDB,
     item.asJava
   }
 
-  def list: F[List[Record]] = {
-    val req = Eval.always(new ScanRequest().withTableName(primaryTable))
-    for {
-      dbItems <- scan[F](client, req)
-      records <- dbItems.traverse[F, Record](parse(_).foldF)
-    } yield records
-  }
-
   def getItem(id: String): F[Option[Item]] =
     for {
       records <- getItemRecords(id)
@@ -118,6 +112,18 @@ class DynamoDbManifest[F[_]](val client: AmazonDynamoDB,
     addRecord(recordId, time, dbRecord)
   }
 
+  def fetch(processedBy: Option[Application], state: Option[State])
+           (implicit F: ManifestAction[F], S: Sync[F]): Stream[F, ItemId] =
+    Query.fetch[F](client, primaryTable)(processedBy, state)
+
+  def stream(implicit S: Sync[F]): Stream[F, Record] = {
+    val dbRecords = for {
+      req <- Stream.eval(getRequest)
+      record <- Query.scan[F](client, req)
+    } yield record
+    dbRecords.map(parse(_).foldF[F]).evalMap(i => i)
+  }
+
   /** Low-level item accessor */
   def getItemRecords(itemId: ItemId): F[List[Record]] = {
     val attributeValues = List(new AttributeValue().withS(itemId)).asJava
@@ -133,7 +139,7 @@ class DynamoDbManifest[F[_]](val client: AmazonDynamoDB,
 
     for {
       result <- response
-      records <- result.traverse[F, Record](parse(_).foldF)
+      records <- result.traverse[F, Record](parse(_).foldF[F])
     } yield records
   }
 
@@ -159,6 +165,10 @@ class DynamoDbManifest[F[_]](val client: AmazonDynamoDB,
     addRecord(r.recordId, r.timestamp, dbItem)
   }
 
+  /** Create Scan request (wrapped in `Sync` as non-referentially transparent) */
+  private[dynamodb] def getRequest(implicit F: Sync[F]): F[ScanRequest] =
+    F.delay(new ScanRequest().withTableName(primaryTable))
+
   private[manifest] def addRecord(recordId: UUID, time: Instant, dbItem: DbRecord): F[(UUID, Instant)] = {
     val request = new PutItemRequest()
       .withTableName(primaryTable)
@@ -178,17 +188,12 @@ class DynamoDbManifest[F[_]](val client: AmazonDynamoDB,
     }
   }
 
-  /** Helper method to flatten `Either` (e.g. in case of parse-error) */
-  private[manifest] implicit class FoldFOp[A](either: Either[ManifestError, A]) {
-    def foldF: F[A] = either.fold(_.raiseError[F, A], _.pure[F])
-  }
-
   def query(application: Application): F[Set[ItemId]] = {
     val req = notProcessedRequest(application)
     val query = Eval.always(req)
     for {
       records <- Common.query[F](client, query)
-      itemIds <- records.traverse[F, ItemId](parseItemId(_).foldF)
+      itemIds <- records.traverse[F, ItemId](parseItemId(_).foldF[F])
     } yield itemIds.toSet
   }
 }
@@ -218,9 +223,9 @@ object DynamoDbManifest {
       .withProvisionedThroughput(new ProvisionedThroughput(DefaultThroughput, DefaultThroughput))
 
     for {
-      response <- IO[F, CreateTableResult](client.createTable(request))
-      table    <- IO[F, Table](new Table(client, tableName, response.getTableDescription))
-      _        <- IO[F, Unit] { table.waitForActive(); () }     // Block until table is available
+      response <- ManifestIO[F, CreateTableResult](client.createTable(request))
+      table    <- ManifestIO[F, Table](new Table(client, tableName, response.getTableDescription))
+      _        <- ManifestIO[F, Unit] { table.waitForActive(); () }     // Block until table is available
     } yield ()
   }
 

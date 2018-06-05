@@ -13,8 +13,7 @@
 package com.snowplowanalytics.manifest
 package core
 
-import scala.util.{ Try, Failure }
-import scala.util.Random.shuffle
+import scala.util.Try
 
 import java.time.Instant
 import java.util.UUID
@@ -22,113 +21,133 @@ import java.util.UUID
 import cats.implicits._
 import cats.data.NonEmptyList
 
-import io.circe.parser.parse
+import _root_.io.circe.parser.parse
 
 import com.snowplowanalytics.iglu.core.{ SelfDescribingData, SchemaVer, SchemaKey }
 
 import org.specs2.Specification
 
-import ProcessingManifest._
+import PureManifest._
+import SpecHelpers.AssetVersion
 
 class ProcessingManifestSpec extends Specification { def is = s2"""
-  Correctly identify unprocessed correct Item $e1
-  Correctly identify locked Item $e2
-  processNewItem adds three correct records $e3
-  Correctly filter out items by predicate $e4
+  getUnprocessed identifies unprocessed Item $e1
+  getUnprocessed identifies locked Item $e2
+  getUnprocessed skips Item filtered out by preprocessor $e8
+  processAll filters out items by predicate $e4
   processedBy takes args into account $e5
-  processedNewItem with existing NEW adds correct records $e6
-  processedNewItem adds correct payload for failed process $e7
+  processNewItem adds three correct records $e3
+  processNewItem with existing NEW adds correct records $e6
+  processNewItem adds correct payload for failed process $e7
+  query respects Skipped records $e9
+  query respects Skipped records with instanceId $e10
+  query can be used to query only by processedBy $e11
+  query can be used to query only by requestedBy $e12
   """
 
   def e1 = {
-    val time = Instant.now()
-    val id1 = UUID.fromString("7c96c841-fc38-437d-bfec-4c1cd9b00000")
-    val id2 = UUID.fromString("7c96c841-fc38-437d-bfec-4c1cd9b00001")
-
     val agent = Agent("rdb-shredder", "0.13.0")
     val author = Author(agent, "0.1.0")
     val records = List(
-      Record("1", Application(agent, None), id1, None, State.New, time, author, None),
-      Record("1", Application(agent, None), id2, id1.some, State.Processing, time.plusSeconds(10), author, None),
-      Record("1", Application(agent, None), UUID.randomUUID(), id2.some, State.Processed, time.plusSeconds(20), author, None)
-    )
+      Record("1", Application(agent, None), id(0), None, State.New, time(0), author, None),
+      Record("1", Application(agent, None), id(1), id(0).some, State.Processing, time(1), author, None),
+      Record("1", Application(agent, None), id(2), id(1).some, State.Processed, time(2), author, None))
 
-    val manifest = ProcessingManifestSpec.StaticManifest(records)
+    val idsForLoader = PureManifest.query(None, Application("rdb-loader", "0.14.0").some)
+    val idsForShredder = PureManifest.query(None, Application("rdb-shredder", "0.13.0").some)
 
-    val newAppExpectation = manifest.unprocessed(Application("rdb-loader", "0.13.0"), _ => true) must beRight(List(Item(NonEmptyList.fromListUnsafe(records))))
-    val oldAppExpectation = manifest.unprocessed(Application("rdb-shredder", "0.14.0"), _ => true) must beRight(Nil)
-    newAppExpectation.and(oldAppExpectation)
-  }
-
-  def e2 = {
-    val time = Instant.now()
-    val agent = Agent("rdb-shredder", "0.13.0")
-    val author = Author(agent, "0.1.0")
-    val id1 = UUID.fromString("7c96c841-fc38-437d-bfec-4c1cd9b00000")
-    val id2 = UUID.fromString("7c96c841-fc38-437d-bfec-4c1cd9b00001")
-
-    val records = List(
-      Record("1", Application(agent, None), id1, None, State.New, time, author, None),
-      Record("1", Application(agent, None), id2, id1.some, State.Processing, time.plusSeconds(10), author, None)
-    )
-
-    val manifest = ProcessingManifestSpec.StaticManifest(records)
-
-    val newAppExpectation = manifest.unprocessed(Application("rdb-loader", "0.13.0"), _ => true) must beLeft.like {
-      case _: ManifestError.Locked => ok
-    }
-    val oldAppExpectation = manifest.unprocessed(Application("rdb-shredder", "0.14.0"), _ => true) must beLeft.like {
-      case _: ManifestError.Locked => ok
-    }
+    val newAppExpectation = PureManifest
+      .getUnprocessed(idsForLoader, _ => true)
+      .run(records) must beRight(List(Item(NonEmptyList.fromListUnsafe(records))))
+    val oldAppExpectation = PureManifest
+      .getUnprocessed(idsForShredder, _ => true)
+      .run(records) must beRight(Nil)
 
     newAppExpectation and oldAppExpectation
   }
 
-  def e4 = {
-    val processed = collection.mutable.ListBuffer.newBuilder[Item]
-    def process(item: Item) = {
-      processed += item
-      Try(None)
-    }
-
-    val time = Instant.now().minusSeconds(1000L)
+  def e2 = {
     val agent = Agent("rdb-shredder", "0.13.0")
     val author = Author(agent, "0.1.0")
-    val id1 = UUID.fromString("7c96c841-fc38-437d-bfec-4c1cd9b00006")
-    val id2 = UUID.fromString("7c96c841-fc38-437d-bfec-4c1cd9b00007")
 
     val records = List(
-      Record("1", Application("rdb-shredder", "0.13.0"), UUID.randomUUID(), None, State.New, time, author, None),
+      Record("1", Application(agent, None), id(0), None, State.New, time(0), author, None),
+      Record("1", Application(agent, None), id(1), id(0).some, State.Processing, time(1), author, None))
+    val lockingRecord = NonEmptyList(records.get(1).get, Nil)
 
-      Record("2", Application("rdb-shredder", "0.13.0"), UUID.randomUUID(), None, State.New, time.plusSeconds(20), author, None),
+    val idsForLoader = PureManifest.query(None, Application("rdb-loader", "0.13.0").some)
+    val idsForShredder = PureManifest.query(None, Application("rdb-loader", "0.14.0").some)
 
-      Record("3", Application("rdb-shredder", "0.13.0"), id1, None, State.New, time.plusSeconds(70), author, None),
-      Record("3", Application("rdb-shredder", "0.13.0"), id2, id1.some, State.Processing, time.plusSeconds(80), author, None),
-      Record("3", Application("rdb-shredder", "0.13.0"), UUID.randomUUID(), id2.some, State.Processed, time.plusSeconds(90), author, None)
+    val newAppExpectation = PureManifest
+      .getUnprocessed(idsForLoader, _ => true)
+      .run(records) must beLeft(ManifestError.Locked(lockingRecord, None))
+    val oldAppExpectation = PureManifest
+      .getUnprocessed(idsForShredder, _ => true)
+      .run(records) must beLeft(ManifestError.Locked(lockingRecord, None))
+
+    newAppExpectation and oldAppExpectation
+  }
+
+  def e3 = {
+    val app = Application("discoverer", "0.1.0")
+    val author = Author(app.agent, AssetVersion)
+    val data = parse("""{"message": "no-exception", "programmingLanguage": "SCALA"}""").toOption.get
+    val payload = SelfDescribingData(
+      SchemaKey("com.snowplowanalytics.snowplow", "application_error", "jsonschema", SchemaVer.Full(1,0,2)),
+      data)
+    val processedData = parse("""{"message": "success", "programmingLanguage": "SCALA"}""").toOption.get
+    val processedPayload = SelfDescribingData(
+      SchemaKey("com.snowplowanalytics.snowplow", "application_error", "jsonschema", SchemaVer.Full(1,0,2)),
+      processedData)
+    val process = () => { Try { Some(processedPayload) } }
+
+    val manifest = for {
+      _ <- PureManifest.processNewItem("a", app, Some(payload), process)
+    } yield ()
+
+    val (records, result) = manifest.value.run(List.empty).unsafeRunSync().toOption.get
+
+    val expectedRecords = List(
+      Record("a",app, PureManifest.id(0), None, State.New,PureManifest.StartTime, author, None),
+      Record("a",app, PureManifest.id(1), None, State.Processing, PureManifest.StartTime.plusSeconds(1), author, Some(payload)),
+      Record("a",app, PureManifest.id(2), Some(PureManifest.id(1)), State.Processed,PureManifest.StartTime.plusSeconds(2),author,Some(processedPayload))
     )
 
-    val manifest = ProcessingManifestSpec.StaticManifest(records)
+    val success = result must beRight
+    val correctRecords = records must containTheSameElementsAs(expectedRecords)
 
-    val processingResult = manifest.processAll(
-      Application("test-process-function", "0.1.0"),
-      Item.processedBy(Application("rdb-shredder", ""), _),
-      None,
-      process)
+    success and correctRecords
+  }
 
-    val contentIsCorrect = manifest.items.map(_.values.toList.flatMap(_.records.toList)).toOption.get.map { r =>
-      (r.itemId, r.state, r.payload, r.application.name)
-    } must containTheSameElementsAs(List(
-      ("2", State.New, None, "rdb-shredder"),
-      ("1", State.New, None, "rdb-shredder"),
-      ("3", State.New, None, "rdb-shredder"),
-      ("3", State.Processing, None, "rdb-shredder"),
-      ("3", State.Processed, None, "rdb-shredder"),
-      ("3", State.Processing, None, "test-process-function"),
-      ("3", State.Processed, None, "test-process-function")
-    ))
-    val processedSingleItem = processed.result().toList.length must beEqualTo(1)
+  def e4 = {
+    def process(item: Item) = Try(None)
 
-    (processingResult must beRight) and contentIsCorrect and processedSingleItem
+    val agent = Agent("rdb-shredder", "0.13.0")
+    val author = Author(agent, "0.1.0")
+
+    val records = List(
+      Record("1", Application("rdb-shredder", "0.13.0"), id(0), None, State.New, time(0), author, None),
+
+      Record("2", Application("rdb-shredder", "0.13.0"), id(1), None, State.New, time(1), author, None),
+
+      Record("3", Application("rdb-shredder", "0.13.0"), id(2), None, State.New, time(2), author, None),
+      Record("3", Application("rdb-shredder", "0.13.0"), id(3), id(2).some, State.Processing, time(3), author, None),
+      Record("3", Application("rdb-shredder", "0.13.0"), id(4), id(3).some, State.Processed, time(4), author, None))
+
+    val newApp = Application("test-process-function", "0.1.0")
+    val newAuthor = Author(newApp.agent, AssetVersion)
+    val newRecords = List(
+      Record("3", newApp, id(5), None, State.Processing, time(5), newAuthor, None),
+      Record("3", newApp, id(6), id(5).some, State.Processed, time(6), newAuthor, None))
+
+    val result = for {
+      _ <- PureManifest.processAll(Application("test-process-function", "0.1.0"), Item.processedBy(Application("rdb-shredder", ""), _), None, process)
+      records <- PureManifest.items.map(_.values.flatMap(_.records.toList).toList)
+    } yield records
+
+    result.run(records) must beRight {
+      containTheSameElementsAs(records ++ newRecords)
+    }
   }
 
   def e5 = {
@@ -161,40 +180,9 @@ class ProcessingManifestSpec extends Specification { def is = s2"""
     transformerProcessed and transformerUnprocessed and loaderProcessed and loaderUnprocessed
   }
 
-  def e3 = {
-    val app = Application("discoverer", "0.1.0")
-    val author = Author(app.agent, ProcessingManifestSpec.AssetVersion)
-    val data = parse("""{"message": "no-exception", "programmingLanguage": "SCALA"}""").toOption.get
-    val payload = SelfDescribingData(
-      SchemaKey("com.snowplowanalytics.snowplow", "application_error", "jsonschema", SchemaVer.Full(1,0,2)),
-      data)
-    val processedData = parse("""{"message": "success", "programmingLanguage": "SCALA"}""").toOption.get
-    val processedPayload = SelfDescribingData(
-      SchemaKey("com.snowplowanalytics.snowplow", "application_error", "jsonschema", SchemaVer.Full(1,0,2)),
-      processedData)
-    val process = () => { Try { Some(processedPayload) } }
-
-    val manifest = for {
-      _ <- PureManifest.processNewItem("a", app, Some(payload), process)
-    } yield ()
-
-    val (records, result) = manifest.value.run(List.empty).value
-
-    val expectedRecords = List(
-      Record("a",app, PureManifest.id(0), None, State.New,PureManifest.StartTime, author, None),
-      Record("a",app, PureManifest.id(1), None, State.Processing, PureManifest.StartTime.plusSeconds(1), author, Some(payload)),
-      Record("a",app, PureManifest.id(2), Some(PureManifest.id(1)), State.Processed,PureManifest.StartTime.plusSeconds(2),author,Some(processedPayload))
-    )
-
-    val success = result must beRight
-    val correctRecords = records must containTheSameElementsAs(expectedRecords)
-
-    success and correctRecords
-  }
-
   def e6 = {
     val app = Application("discoverer", "0.1.0")
-    val author = Author(app.agent, ProcessingManifestSpec.AssetVersion)
+    val author = Author(app.agent, AssetVersion)
     val data = parse("""{"message": "no-exception", "programmingLanguage": "SCALA"}""").toOption.get
     val payload = SelfDescribingData(
       SchemaKey("com.snowplowanalytics.snowplow", "application_error", "jsonschema", SchemaVer.Full(1,0,2)),
@@ -210,7 +198,7 @@ class ProcessingManifestSpec extends Specification { def is = s2"""
       _ <- PureManifest.processNewItem("a", app, Some(payload), process)
     } yield ()
 
-    val (records, result) = manifest.value.run(List(newRecord)).value
+    val (records, result) = manifest.value.run(List(newRecord)).unsafeRunSync().toOption.get
 
     val expectedRecords = List(
       newRecord,
@@ -226,7 +214,7 @@ class ProcessingManifestSpec extends Specification { def is = s2"""
 
   def e7 = {
     val app = Application("discoverer", "0.1.0")
-    val author = Author(app.agent, ProcessingManifestSpec.AssetVersion)
+    val author = Author(app.agent, AssetVersion)
     val data = parse("""{"message": "no-exception", "programmingLanguage": "SCALA"}""").toOption.get
     val payload = SelfDescribingData(
       SchemaKey("com.snowplowanalytics.snowplow", "application_error", "jsonschema", SchemaVer.Full(1,0,2)),
@@ -238,7 +226,7 @@ class ProcessingManifestSpec extends Specification { def is = s2"""
       _ <- PureManifest.processNewItem("a", app, Some(payload), process)
     } yield ()
 
-    val (records, result) = manifest.value.run(Nil).value
+    val (records, result) = manifest.value.run(Nil).unsafeRunSync().toOption.get
 
     val expectedRecords = List(
       Record("a",app, PureManifest.id(0), None, State.New,PureManifest.StartTime, author, None),
@@ -252,47 +240,114 @@ class ProcessingManifestSpec extends Specification { def is = s2"""
     val failureExpectation = result must beLeft(error)
     val correctRecords = records must containAllOf(expectedRecords)
     val failedRecordExpectation = failedRecord must beSome.like {
-      case record =>
-        val previous = record.previousRecordId must beSome(UUID.fromString("55a54008-ad1b-3589-aa21-0d2629c1df41"))
-        val payload = record.payload must beSome.like {
-          case p => p.schema must beEqualTo(SchemaKey("com.snowplowanalytics.snowplow", "application_error", "jsonschema", SchemaVer.Full(1,0,2)))
-          case p => ko(s"Unexpected FAILED payload SchemaKey ${p.schema}")
-        }
-        previous and payload
-      case other => ko(s"FAILED record has unexpected structure $other")
+      case Record(_, _, _, previousRecordId, _, _, _, payload) =>
+        val previous = previousRecordId must beSome(UUID.fromString("55a54008-ad1b-3589-aa21-0d2629c1df41"))
+        val schema = payload.map(_.schema) must beSome(SchemaKey("com.snowplowanalytics.snowplow", "application_error", "jsonschema", SchemaVer.Full(1,0,2)))
+        previous and schema
     }
 
     failureExpectation and correctRecords and failedRecordExpectation
   }
-}
 
-object ProcessingManifestSpec {
+  def e8 = {
+    val agent = Agent("rdb-shredder", "0.13.0")
+    val author = Author(agent, "0.1.0")
 
-  type F[A] = Either[ManifestError, A]
+    val records = List(
+      Record("1", Application(agent, None), id(0), None, State.New, time(0), author, None),
+      Record("1", Application(agent, None), id(1), id(0).some, State.Processing, time(1), author, None))
 
-  val AssetVersion: String = "0.1.0-M4"
+    val ids = PureManifest.query(Application("rdb-shredder", "0.13.0").some, Application("rdb-loader", "0.13.0").some)
 
-  case class StaticManifest(records: List[Record]) extends ProcessingManifest[F](SpecHelpers.igluCentralResolver) {
-
-    val stateBuffer = collection.mutable.ListBuffer(records: _*)
-
-    def mixed: List[Record] = shuffle(stateBuffer.toList)
-
-    def getItem(id: ItemId): Either[ManifestError, Option[Item]] = {
-      val map = mixed.groupBy(_.itemId).map { case (i, r) => (i, Item(NonEmptyList.fromListUnsafe(r))) }
-      Right(map.get(id))
-    }
-
-    def put(id: ItemId, app: Application, previousRecordId: Option[UUID], step: State, author: Option[Agent], payload: Option[Payload]): Either[ManifestError, (UUID, Instant)] =
-      Right {
-        val recordId = UUID.randomUUID()
-        val time = Instant.now()
-        stateBuffer += Record(id, app, recordId, previousRecordId, step, time, Author(Agent("rdb-shredder", "0.13.0"), "0.1.0"), payload)
-        (recordId, time)
-      }
-
-    def list: Either[ManifestError, List[Record]] = Right(mixed)
+    PureManifest
+      .getUnprocessed(ids, _ => true)
+      .run(records) must beRight(List.empty)
   }
 
-  def all[A](a: A): Boolean = true
+  def e9 = {
+    val agent = Agent("rdb-shredder", "0.13.0")
+    val author = Author(agent, "0.1.0")
+    val loader = Application("rdb-loader", "0.14.0")
+
+    val records = List(
+      Record("1", Application(agent, None), id(0), None, State.New, time(0), author, None),
+      Record("1", Application(agent, None), id(1), id(0).some, State.Processing, time(1), author, None),
+      Record("1", Application(agent, None), id(2), id(1).some, State.Processed, time(2), author, None),
+      Record("1", loader, id(3), id(2).some, State.Skipped, time(3), author, None))
+
+    PureManifest
+      .query(Application("rdb-shredder", "0.13.0").some, Application("rdb-loader", "0.13.0").some)
+      .compile.toList
+      .run(records) must beRight(List.empty)
+  }
+
+  def e10 = {
+    val agent = Agent("rdb-shredder", "0.13.0")
+    val author = Author(agent, "0.1.0")
+    val loader = Application(Agent("rdb-loader", "0.14.0"), Some("id1"))
+
+    val records = List(
+      Record("1", Application(agent, None), id(0), None, State.New, time(0), author, None),
+      Record("1", Application(agent, None), id(1), id(0).some, State.Processing, time(1), author, None),
+      Record("1", Application(agent, None), id(2), id(1).some, State.Processed, time(2), author, None),
+      Record("1", loader, id(3), None, State.Processing, time(3), author, None),
+      Record("1", loader, id(4), id(3).some, State.Processed, time(4), author, None))
+
+    val presentIdIsExcluded = PureManifest
+      .query(Application("rdb-shredder", "0.13.0").some, loader.some)
+      .compile.toList
+      .run(records) must beRight(List.empty)
+    val absentIdIsIncluded = PureManifest
+      .query(Application("rdb-shredder", "0.13.0").some, loader.copy(instanceId = Some("id2")).some)
+      .compile.toList
+      .run(records) must beRight(List("1"))
+
+    presentIdIsExcluded and absentIdIsIncluded
+  }
+
+  def e11 = {
+    val agent = Agent("rdb-shredder", "0.13.0")
+    val author = Author(agent, "0.1.0")
+
+    val itemOne = List(
+      Record("1", Application(agent, None), id(0), None, State.New, time(0), author, None),
+      Record("1", Application(agent, None), id(1), id(0).some, State.Processing, time(1), author, None),
+      Record("1", Application(agent, None), id(2), id(1).some, State.Processed, time(2), author, None))
+
+    val itemTwo = List(
+      Record("2", Application(agent, None), id(3), None, State.New, time(3), author, None),
+      Record("2", Application(agent, None), id(4), id(3).some, State.Processing, time(4), author, None),
+      Record("2", Application(agent, None), id(5), id(4).some, State.Processed, time(5), author, None))
+
+    val records = itemOne ++ itemTwo
+
+    PureManifest
+      .query(Application("rdb-shredder", "0.13.0").some, None)
+      .compile.toList
+      .run(records) must beRight(List("1", "2"))
+  }
+
+  def e12 = {
+    val agent = Agent("rdb-shredder", "0.13.0")
+    val author = Author(agent, "0.1.0")
+    val loader = Application(Agent("rdb-loader", "0.14.0"), Some("id1"))
+
+    val itemOne = List(
+      Record("1", Application(agent, None), id(0), None, State.New, time(0), author, None),
+      Record("1", Application(agent, None), id(1), id(0).some, State.Processing, time(1), author, None),
+      Record("1", Application(agent, None), id(2), id(1).some, State.Processed, time(2), author, None))
+
+    val itemTwo = List(
+      Record("2", Application(agent, None), id(3), None, State.New, time(3), author, None),
+      Record("2", Application(agent, None), id(4), id(3).some, State.Processing, time(4), author, None),
+      Record("2", Application(agent, None), id(5), id(4).some, State.Processed, time(5), author, None))
+
+    val records = itemOne ++ itemTwo
+
+    PureManifest
+      .query(None, loader.some)   // without preparedBy restriction Loader can process anything that it didn't process yet
+      .compile.toList
+      .run(records) must beRight(List("1", "2"))
+  }
 }
+

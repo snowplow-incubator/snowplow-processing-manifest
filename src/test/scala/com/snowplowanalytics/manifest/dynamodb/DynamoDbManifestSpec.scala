@@ -17,8 +17,7 @@ import scala.concurrent.Future
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.util.Try
 
-import java.util.UUID
-
+import cats.data.{ State => _, _ }
 import cats.implicits._
 
 import com.amazonaws.auth.{AWSStaticCredentialsProvider, BasicAWSCredentials}
@@ -70,19 +69,19 @@ class DynamoDbManifestSpec extends Specification with AroundEach { def is = s2""
         DynamoDbManifestSpec.intToState(i),
         None)
     }
-    val client = new DynamoDbManifest(Client, TableName, SpecHelpers.igluCentralResolver)
+    val client = new DynamoDbManifest[ManifestIO](Client, TableName, SpecHelpers.igluCentralResolver)
     val putResult = records.map(record => client.put(record.id, record.app, None, record.stepState, None, record.payload)).toList.sequence
     val items = client.items
 
-    val retrievedExpectation = items.map(_.keySet.size) must beRight(expectedItems)
-    val addedExpectation = putResult.map(_.length) must beRight(cardinality)
+    val retrievedExpectation = items.map(_.keySet.size).getValue must beRight(expectedItems)
+    val addedExpectation = putResult.map(_.length).getValue must beRight(cardinality)
 
     // Get 10 random items just being saved
     // Each item must contain exactly 3 records
     // Otherwise `getItem` does not fetch all corresponding records
     val randomIds = scala.util.Random.shuffle(records).take(10).map(_.id)
     val randomItems = randomIds.foldLeft(List.empty[Option[Item]]) {
-      (acc, cur) => client.getItem(cur).fold(x => throw new RuntimeException(x.toString), x => x) :: acc
+      (acc, cur) => client.getItem(cur).getValue.fold(x => throw new RuntimeException(x.toString), x => x) :: acc
     }.flatten
     val itemSizesExpectation = randomItems.map(_.records.size) must like {
       case sizes => sizes must contain(allOf(be_==(states)))
@@ -91,27 +90,28 @@ class DynamoDbManifestSpec extends Specification with AroundEach { def is = s2""
     addedExpectation and retrievedExpectation and itemSizesExpectation
   }
 
-  // This spec often fails due sequential (not parallel) Future-execution
+  // Simultaneous lock acquisition
+  // This spec often fails due sequential (not parallel) Future-execution on Travis CI
   def e3 = {
     def process(item: Item): Try[Option[Payload]] = Try(None)
 
-    val client = new DynamoDbManifest(Client, TableName, SpecHelpers.igluCentralResolver)
+    val client = new DynamoDbManifest[ManifestIO](Client, TableName, SpecHelpers.igluCentralResolver)
     client.put("s3://folder", Application("manifest-test", "0.1.0-rc1"), None, State.New, None, None)
 
     // Two threads simultaneously set Processing for an item,
     // then realize (on secondary check) that they both did it
     // Both fail without proceeding to actual processing
-    var firstAppResult: Try[IO[Unit]] = null
-    var secondAppResult: Try[IO[Unit]] = null
+    var firstAppResult: Try[Either[ManifestError, Unit]] = null
+    var secondAppResult: Try[Either[ManifestError, Unit]] = null
     Future {
       client.processAll(Application("app-1", "0.1.0-rc1"), all, None, process)
-    } onComplete { case result => firstAppResult = result }
+    } onComplete { case result => firstAppResult = result.map(_.getValue) }
     Future {
       client.processAll(Application("app-2", "0.1.0-rc1"), all, None, process)
-    } onComplete { case result => secondAppResult = result }
+    } onComplete { case result => secondAppResult = result.map(_.getValue) }
     Thread.sleep(2000)
 
-    val manifestContent = client.items
+    val manifestContent = client.items.getValue
 
     val twoFailuresExpectation = firstAppResult must beSuccessfulTry.like {
       case Left(l1: ManifestError.Locked) =>
@@ -135,35 +135,39 @@ class DynamoDbManifestSpec extends Specification with AroundEach { def is = s2""
   }
 
   def e4 = {
-    def process(delayMs: Long)(item: Item): Try[Option[Payload]] = {
-      Thread.sleep(delayMs)
-      Try(None)
-    }
+    def process(delayMs: Long): ProcessingManifest.Process =
+      _ => Try { Thread.sleep(delayMs); None }
 
-    val client = new DynamoDbManifest(Client, TableName, SpecHelpers.igluCentralResolver)
+    val client = new DynamoDbManifest[ManifestIO](Client, TableName, SpecHelpers.igluCentralResolver)
     client.put("s3://folder", Application("manifest-test", "0.1.0-rc1"), None, State.New, None, None)
 
     // Second thread tries to acquire lock when first already acquired (process is blocking),
     // bot not released yet. First proceeds without problems,
     // second one exits with locked state, without adding anything to manifest
-    var firstAppResult: Try[IO[Unit]] = null
-    var secondAppResult: Try[IO[Unit]] = null
+    var firstAppResult: Try[Either[ManifestError, Unit]] = null
+    var secondAppResult: Try[Either[ManifestError, Unit]] = null
     Future {
       client.processAll(Application("manifest-test", "0.1.0-rc1"), all, None, process(2000L))
-    } onComplete { case result => firstAppResult = result }
+    } onComplete { result => firstAppResult = result.map(_.getValue) }
     Future {
       Thread.sleep(1000)
-      client.processAll(Application("manifest-test", "0.1.0-rc1"), all, None, process(0L))
-    } onComplete { case result => secondAppResult = result }
+      client.processAll(Application("manifest-test", "0.1.0-rc1"), all, None, process(0))
+    } onComplete { result => secondAppResult = result.map(_.getValue) }
     Thread.sleep(3000)
 
     val expectedSteps = List(State.New, State.Processing, State.Processed)
-    val firstAppExpectation = firstAppResult must beSuccessfulTry.like { case Right(_) => ok }
-    val secondAppExpectation = secondAppResult must beSuccessfulTry.like { case Left(_: ManifestError.Locked) => ok }
-    val itemsExpectation = client.items must beRight.like {
+    val firstAppExpectation = firstAppResult must beSuccessfulTry.like {
+      case Right(_) => ok
+      case Left(error) => ko(s"First application failed with $error")
+    }
+    val secondAppExpectation = secondAppResult must beSuccessfulTry.like {
+      case Right(_) => ko("Second application managed to process Item")
+      case Left(_: ManifestError.Locked) => ok
+    }
+    val itemsExpectation = client.items.getValue must beRight.like {
       case globalState =>
         val singleKey = globalState.keySet must beEqualTo(Set("s3://folder"))
-        val values = globalState.values.map(_.records.map(_.state).toList).toList.flatten must beEqualTo(expectedSteps)
+        val values = globalState.values.flatMap(_.records.toList.map(_.state)) must beEqualTo(expectedSteps)
         singleKey.and(values)
     }
 
@@ -172,7 +176,6 @@ class DynamoDbManifestSpec extends Specification with AroundEach { def is = s2""
 }
 
 object DynamoDbManifestSpec {
-  type IO[A] = Either[ManifestError, A]
 
   case class RecordPayload(id: String, app: Application, stepState: State, payload: Option[Payload])
 

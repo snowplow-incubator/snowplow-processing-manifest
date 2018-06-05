@@ -20,6 +20,7 @@ object Dependencies {
     // Scala
     val circe            = "0.9.3"
     val cats             = "1.1.0"
+    val fs2              = "0.10.5"
     val igluClient       = "0.5.0"
     val igluCore         = "0.2.0"
     // Scala (test only)
@@ -33,6 +34,7 @@ object Dependencies {
   val circeGeneric     = "io.circe"                   %% "circe-generic"        % V.circe
   val circeJavaTime    = "io.circe"                   %% "circe-java8"          % V.circe
   val cats             = "org.typelevel"              %% "cats-core"            % V.cats
+  val fs2              = "co.fs2"                     %% "fs2-core"             % V.fs2
   val igluClient       = "com.snowplowanalytics"      %% "iglu-scala-client"    % V.igluClient
   val igluCore         = "com.snowplowanalytics"      %% "iglu-core"            % V.igluCore
   val igluCoreCirce    = "com.snowplowanalytics"      %% "iglu-core-circe"      % V.igluCore

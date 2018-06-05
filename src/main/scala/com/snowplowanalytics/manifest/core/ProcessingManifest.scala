@@ -20,8 +20,11 @@ import java.time.Instant
 import java.util.UUID
 
 import cats._
+import cats.effect._
 import cats.data.NonEmptyList
 import cats.implicits._
+
+import fs2._
 
 import com.snowplowanalytics.iglu.client.Resolver
 
@@ -32,7 +35,8 @@ import ManifestError._
   * Base trait for processing manifest functionality
   * @tparam F effect producing by interaction with manifest
   */
-abstract class ProcessingManifest[F[_]](val resolver: Resolver)(implicit private[manifest] val F: ManifestAction[F]) {
+abstract class ProcessingManifest[F[_]](val resolver: Resolver)
+                                       (implicit private[manifest] val F: ManifestAction[F]) {
   /** Add an atomic record to manifest */
   def put(itemId: ItemId,
           app: Application,
@@ -44,21 +48,75 @@ abstract class ProcessingManifest[F[_]](val resolver: Resolver)(implicit private
   /** Get state of single item, with validating state of `Item` */
   def getItem(id: ItemId): F[Option[Item]]
 
-  /** Get full manifest */
-  def list: F[List[Record]]
+  /**
+    * Get ids of items that were processed by `processedBy` and NOT processed by `application`
+    * Most common kind of query for Processing Manifest.
+    */
+  def query(preparedBy: Option[Application], requester: Option[Application])
+           (implicit S: Sync[F]): Stream[F, ItemId] = {
+    val emptySet = Stream.emit(Set.empty[ItemId]).covary[F]
+    for {
+      skippedItems <- fetch(requester, State.Skipped.some)
+        .through(materialize)
 
-  /** Get full manifest with items grouped by their id, without validating state of `Item` */
-  def items: F[ManifestMap] = list.map { records =>
-    // Replace with .groupByNel in 1.0.1
-    records.groupBy(_.itemId).map { case (k, list) => list match {
-      case h :: t => (k, Item(NonEmptyList(h, t))).some
-      case Nil => none[(String, Item)]
-    }}.toList.sequence.map(_.toMap).getOrElse(Map.empty)
+      alreadyProcessedStream = fetch(requester, State.Processed.some)
+        .filter(!skippedItems.contains(_))
+        .through(materialize)
+      alreadyProcessedItems <- requester.fold(emptySet)(_ => alreadyProcessedStream)
+
+      preparedStream = fetch(preparedBy, State.Processed.some)
+        .filter(!skippedItems.contains(_))
+        .through(materialize)
+      preparedItems <- preparedBy.fold(emptySet)(_ => preparedStream)
+
+      allItems <- fetch(None, State.New.some)
+        .filter(!skippedItems.contains(_))
+        .filter(!alreadyProcessedItems.contains(_))
+        .filter(id => if (preparedBy.isEmpty) true else preparedItems.contains(id))
+    } yield allItems
   }
 
-  /** Short-hand to get all unprocessed items */
-  def unprocessed(application: Application, predicate: Item => Boolean): F[List[Item]] =
-    ProcessingManifest.unprocessed(items, application, predicate)
+  def fetch(processedBy: Option[Application], state: Option[State])
+           (implicit F: ManifestAction[F], S: Sync[F]): Stream[F, ItemId]
+
+  /** Get full manifest */
+  def stream(implicit S: Sync[F]): Stream[F, Record]
+
+  /**
+    * Get items from collection of ids that:
+    * + were processed by `preprocessor` application
+    * + were NOT yet processed by specified `application`
+    * + match `predicate` function
+    * + not in "blocked" or "failed" state
+    * @param predicate filter function to get only valid `Item`s,
+    *                  e.g. containing particular payload
+    */
+  def getUnprocessed(itemIds: Stream[F, ItemId],
+                     predicate: Item => Boolean)
+                    (implicit S: Sync[F]): F[List[Item]] = {
+
+    val NotFoundError = ManifestError.invalidContent("Cannot find previously existing ItemId").raiseError[F, Item]
+    val aggregated = itemIds
+      .evalMap(getItem)
+      .evalMap(_.fold(NotFoundError)(F.pure))
+      .map(item => item -> StateCheck.inspect(item))
+      .fold(QueryResult.emptyQueryResult) {
+        case (QueryResult(blocked, items), (item, StateCheck.Ok)) if predicate(item) =>
+          QueryResult(blocked, item :: items)
+        case (QueryResult(blocked, items), (_, StateCheck.Blocked(record))) =>
+          QueryResult(record :: blocked, items)
+        case (result, (_, StateCheck.Ok)) =>
+          result
+      }
+
+    S.flatMap(aggregated.compile.toList) { Foldable[List].fold(_) match {
+      case QueryResult(h :: t, _) =>
+        val error: ManifestError = Locked(NonEmptyList(h, t), None)
+        error.raiseError[F, List[Item]]
+      case QueryResult(_, toProcess) =>
+        F.pure(toProcess)
+    } }
+  }
 
   /**
     * Similar to `processItem`, but works without existing `Item`,
@@ -84,67 +142,24 @@ abstract class ProcessingManifest[F[_]](val resolver: Resolver)(implicit private
 
   /** Acquire lock, apply processing function and write its result back to manifest */
   def processItem(app: Application, acquirePayload: Option[Payload], process: Process)(item: Item): F[(UUID, Instant)] =
-    processItemWithHandler[F](LockHandler)(app, acquirePayload, process)(item)
+    processItemWithHandler[F](LockHandler.Default(this))(app, acquirePayload, process)(item)
 
   /**
-    * Apply `Process` function to all unprocessed events
+    * Apply `Process` function to all items unprocessed by `app`
     * For each item, lock will be held. If any of items already holding a lock,
     * function breaks immediately
     */
   def processAll(app: Application,
                  predicate: Item => Boolean,
                  acquirePayload: Option[Payload],
-                 process: Process): F[Unit] = {
-
+                 process: Process)
+                (implicit S: Sync[F]): F[Unit] = {
+    implicit val F: Functor[F] = S
     for {
-      items <- unprocessed(app, predicate)
-      _ <- items.traverse[F, (UUID, Instant)](processItem(app, acquirePayload, process))
+      // We don't care be what apps item was already processed
+      records <- getUnprocessed(query(None, Some(app)), predicate)
+      _ <- records.traverse[F, (UUID, Instant)](processItem(app, acquirePayload, process))
     } yield ()
-  }
-
-  /** Helper to release lock (put `Processed`) */
-  final def release(app: Application, item: Item, previous: UUID, payload: Option[Payload]): F[(UUID, Instant)] =
-    put(item.id, app, previous.some, State.Processed, None, payload)
-
-  /** Helper to mark `Item` as `Failed` (put `Failed`) */
-  final def fail(app: Application, item: Item, previous: UUID, throwable: Throwable): F[(UUID, Instant)] = {
-    val payload = Payload.exception(throwable)
-    put(item.id, app, previous.some, State.Failed, None, Some(payload))
-  }
-
-  /** Default handler, adding `Processing` for acquire and `Processed` for release */
-  val LockHandler: LockHandler[F] =
-    ProcessingManifest.LockHandler[F](acquire, release, fail)
-
-  /**
-    * Acquire lock by adding `Processing` state to the `Item`
-    * Only processing-apps should acquire lock (no snowplowctl)
-    *
-    * It performs two Item-checks: one *before* acquiring lock, to check that
-    * application is still working with unchanged item (some time might pass
-    * since we received `Item` - it even could happen in batch);
-    * one *after* acquiring lock, to check that meanwhile `put`-request was sent
-    * no other application attempted to write to this item
-    * It acquires lock for particular application, but will also fail because of
-    * "race condition" if any other application attempted to write
-    * @param app application that tries to acquire lock
-    * @param item original unprocessed item, from batch of `items`
-    * @param payload payload that will be add to `Processing` record
-    * @return time of adding `Processing` within `MonadError` effect, telling if acquisition was successful
-    */
-  private[manifest] def acquire(app: Application, item: Item, payload: Option[Payload]): F[(UUID, Instant)] = {
-    val result = for {
-      _      <- checkConsistency(item, None)
-      result <- put(item.id, app, none, State.Processing, None, payload)
-      (id, _) = result
-      _      <- checkConsistency(item, Some(id))
-    } yield result
-
-    result.onError {
-      // If another app managed to add `Processing` - mark it as `Failed`
-      case Locked(_, Some(blockingRecord)) =>
-        put(item.id, app, none, State.Failed, None, Some(Payload.locked(blockingRecord))).void
-    }
   }
 
   /**
@@ -159,7 +174,7 @@ abstract class ProcessingManifest[F[_]](val resolver: Resolver)(implicit private
       existing <- getItem(id)
       result   <- existing match {
         case Some(item) =>
-          val result = checkState[F](item, i => !Item.processedBy(application, i) && Item.canBeProcessedBy(application)(i))
+          val result = ifUnprocessed[F](item, i => !Item.processedBy(application, i) && Item.canBeProcessedBy(application)(i))
           result.map(i => (i, false))
         case None =>
           val authorApp = Author(application.agent, Version)
@@ -180,43 +195,6 @@ abstract class ProcessingManifest[F[_]](val resolver: Resolver)(implicit private
       }
     } yield result
   }
-
-
-  /**
-    * Check that storage still holds the same `Item`,
-    * nothing changed it after original `Item` was fetched
-    * @param item original list of records
-    * @param added one record that has been added since last check
-    */
-  private[manifest] def checkConsistency(item: Item, added: Option[UUID]): F[Item] = {
-
-    def isConsistent(freshItem: Item): F[Unit] = added match {
-      case None =>       // First check
-        checkEmptiness(freshItem.records.toList.diff(item.records.toList))
-      case Some(id) =>   // Second check
-        checkEmptiness(freshItem.records.filterNot(_.recordId == id).diff(item.records.toList))
-    }
-
-    def checkEmptiness(records: List[Record]): F[Unit] = records match {
-      case Nil => ().pure[F]
-      case h :: t =>
-        val error: ManifestError = Locked(NonEmptyList(h, t), added)
-        error.raiseError[F, Unit]
-    }
-
-    def isExisting(freshItem: Option[Item]): F[Item] = freshItem match {
-      case Some(existing) => existing.pure[F]
-      case None =>
-        val error: ManifestError = Corrupted(Corruption.ItemLost(item))
-        error.raiseError[F, Item]
-    }
-
-    for {
-      freshItem <- getItem(item.id)
-      current   <- isExisting(freshItem)
-      _         <- isConsistent(current)
-    } yield current
-  }
 }
 
 object ProcessingManifest {
@@ -227,14 +205,8 @@ object ProcessingManifest {
     */
   type ManifestAction[F[_]] = MonadError[F, ManifestError]
 
-  /** Id representation, such as S3 URI */
-  type ItemId = String
-
   /** Global manifests' version */
   val Version: String = generated.ProjectMetadata.version
-
-  /** All items, grouped by their id */
-  type ManifestMap = Map[ItemId, Item]
 
   /** Application's main side-effecting function, processing manifest's item */
   type Process = Item => Try[Option[Payload]]
@@ -242,18 +214,11 @@ object ProcessingManifest {
   /** Lazy function that does not expect existing `Item` (probably it'll be created due course) */
   type ProcessNew = () => Try[Option[Payload]]
 
-  /** Wrapper for function that performs `put` and can add some payload of `A` */
-  type PutFunction[F[_], A] = (Application, Item, UUID, A) => F[(UUID, Instant)]
-
   /**
     * Class holding all methods necessary to interact with manifest during processing
     * Function can be overwritten to mock IO-interactions
     * All application using `LockHandler` are supposed to be "processing applications", not "operational"
     */
-  case class LockHandler[F[_]](acquire: (Application, Item, Option[Payload]) => F[(UUID, Instant)],
-                               release: PutFunction[F, Option[Payload]],
-                               fail: PutFunction[F, Throwable])
-
   /** Workflow surrounding processing an `Item`. Lock acquisition and release */
   def processItemWithHandler[F[_]: ManifestAction](lockHandler: LockHandler[F])
                                                   (app: Application,
@@ -276,43 +241,8 @@ object ProcessingManifest {
     } yield putPair
   }
 
-  /**
-    * Get items that were NOT yet processed by specified application
-    * and not in "blocked" or "failed" state
-    * @param itemsAction all items to check
-    * @param predicate filter function to get only valid `Item`s,
-    *                  e.g. processed by transformer, but not processed by loader
-    * @return list of `Item` that were not yet processed by `application`
-    */
-  def unprocessed[F[_]: ManifestAction](itemsAction: F[ManifestMap],
-                                        application: Application,
-                                        predicate: Item => Boolean): F[List[Item]] = {
-    // Defensive predicate, ensuring that current application has not been applied yet
-    def unprocessedPredicate(i: Item) =
-      !Item.processedBy(application, i) && predicate(i) && Item.canBeProcessedBy(application)(i)
-
-    itemsAction.flatMap { stateMap =>
-      val itemMap = stateMap.map { case (_, i) => (i, StateCheck.inspect(i)) }
-
-      val lockingRecords = itemMap.collect {
-        case (_, StateCheck.Blocked(record)) => record
-      }.toList
-
-      lockingRecords match {
-        case Nil =>
-          val toProcess = itemMap.collect {
-            case (i, StateCheck.Ok) if unprocessedPredicate(i) => i
-          }
-          toProcess.toList.pure[F]
-        case h :: t =>
-          val error: ManifestError = Locked(NonEmptyList(h, t), None)
-          error.raiseError[F, List[Item]]
-      }
-    }
-  }
-
-  /** Version of `unprocessed` for single retrieved Item */
-  def checkState[F[_]: ManifestAction](item: Item, predicate: Item => Boolean): F[Item] = {
+  /** Version of `getUnprocessed` for single retrieved Item */
+  def ifUnprocessed[F[_]: ManifestAction](item: Item, predicate: Item => Boolean): F[Item] = {
     StateCheck.inspect(item) match {
       case StateCheck.Ok if predicate(item) => item.pure[F]
       case StateCheck.Ok =>
@@ -322,6 +252,20 @@ object ProcessingManifest {
       case StateCheck.Blocked(record) =>
         val error: ManifestError = Locked(NonEmptyList(record, Nil), None)
         error.raiseError[F, Item]
+    }
+  }
+
+  private case class QueryResult(blocked: List[Record], toProcess: List[Item])
+
+  private object QueryResult {
+    val emptyQueryResult = QueryResult(Nil, Nil)
+
+    def merge(a: QueryResult, b: QueryResult): QueryResult =
+      QueryResult((a.blocked ++ b.blocked).distinct, (a.toProcess ++ b.toProcess).distinct)
+
+    implicit val monoid: Monoid[QueryResult] = new Monoid[QueryResult] {
+      def empty = emptyQueryResult
+      def combine(x: QueryResult, y: QueryResult) = merge(x, y)
     }
   }
 }

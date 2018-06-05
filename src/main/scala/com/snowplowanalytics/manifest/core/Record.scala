@@ -27,8 +27,6 @@ import com.snowplowanalytics.iglu.client.Resolver
 import com.snowplowanalytics.iglu.core.circe.implicits._
 import com.snowplowanalytics.iglu.core.circe.instances.igluNormalizeDataJValue
 
-import ProcessingManifest.ItemId
-
 /**
   * Atomic unit of `Item`. Usually represented as immutable row in a DB table (manifest)
   * Each record represents some state change of `Item`

@@ -75,7 +75,7 @@ object ManifestError {
           s"Manifest is locked and app cannot proceed due following unconsumed records ${reason.toList.mkString(", ")} " +
             s"This is probably happened due race condition for $acquired. Safe to add `Resolved` record"
         case IoError(message) =>
-          s"IO Error during communication with manifest. Add `Resolved` record to proceed\n$message"
+          s"IO Error during communication with manifest. Contact system administrator\n$message"
         case ApplicationError(throwable, app, runId) =>
           val sw = new StringWriter()
           val pw = new PrintWriter(sw)

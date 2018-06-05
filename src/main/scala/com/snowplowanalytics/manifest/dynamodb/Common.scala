@@ -57,7 +57,7 @@ object Common {
     case None => e.asLeft
   }
 
-  object IO {
+  object ManifestIO {
     def apply[F[_]: ManifestAction, A](a: => A): F[A] = try {
       a.pure[F]
     } catch {

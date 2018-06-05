@@ -92,8 +92,8 @@ object Serialization {
     }
 
   def parseItemId(dbRecord: DbRecord): Either[ManifestError, String] = {
-    def getS(key: String): Either[String, String] = for {
-      value <- foldO(dbRecord.asScala.get(key), s"Key $key does not exist")
+    def getS(key: String) = for {
+      value <- foldO(dbRecord.asScala.get(key), s"Key $key does not exist in $dbRecord")
       str <- foldO(Option(value.getS), s"Key $key is not a string")
     } yield str
 

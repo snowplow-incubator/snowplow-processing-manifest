@@ -10,7 +10,8 @@
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the Apache License Version 2.0 for the specific language governing permissions and limitations there under.
  */
-package com.snowplowanalytics.manifest.core
+package com.snowplowanalytics.manifest
+package core
 
 import java.util.UUID
 
@@ -138,21 +139,28 @@ object Item {
     * `Application(_, _, Some(a), _)` and `Application(_, _, Some(b), _)`,
     * making safe double-processing (e.g. loading to two storage targets) by same rdb-loader
     */
-  final def processedBy(application: Application, item: Item): Boolean = {
+  final def processedBy(application: Application, item: Item): Boolean =
+    item.records.foldLeft(false) { (acc, cur) => acc || processedBy(application, cur) }
+
+  final def processedBy(application: Application, record: Record): Boolean =
+    inState(application, record, Some(State.Processed))
+
+  private[manifest] final def inState(application: Application, record: Record, state: Option[State]): Boolean = {
     // Special check, allowing to mark existing Items *without* argument as processed
     // against application *with* arguments.
-    val argsChecker: (Boolean, (String, Option[String])) => Boolean = {
-      case (acc, (currentApp, instanceId)) => acc || (currentApp == application.name && (application.instanceId match {
+    val argsChecker: (String, Option[String]) => Boolean = {
+      case (currentApp, instanceId) => currentApp == application.name && (application.instanceId match {
         case Some(_) if instanceId.isEmpty => true
         case Some(x) => instanceId.contains(x)
         case None => application.instanceId.isEmpty
-      }))
+      })
     }
 
-    item.records
-      .filter(_.state == State.Processed)
-      .map(s => (s.application.name, s.application.instanceId))
-      .foldLeft(false)(argsChecker)
+    val app = record.application
+    (state match {
+      case Some(s) => s == record.state
+      case None => true
+    }) && argsChecker(app.name, app.instanceId)
   }
 
   /** Check if list of applications extracted from SKIPPED record are blocking current app */
