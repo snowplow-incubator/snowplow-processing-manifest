@@ -15,27 +15,17 @@ package com.snowplowanalytics.manifest
 import com.snowplowanalytics.iglu.client.Resolver
 
 import cats.data._
-import cats.effect.IO
-
-import core.{ ManifestError, Item, Record }
 
 import org.json4s.jackson.JsonMethods.parse
 
+import core.{ ManifestError, Item, Record }
+import pure.PureManifest
+
 object SpecHelpers {
 
-  val AssetVersion: String = "0.1.0-M5"
+  val AssetVersion: String = "0.1.0-M6"
 
   type Action[A] = Either[ManifestError, A]
-
-  // IO is temporary here, due unnecessary Sync restriction from ProcessingManifest
-  type ManifestState[S, A] = StateT[IO, S, A]
-
-  object ManifestState {
-    def apply[S, A](f: S => (S, A)): ManifestState[S, A] =
-      StateT[IO, S, A](s => IO(f(s)))
-  }
-
-  type PureManifestEffect[A] = EitherT[ManifestState[List[Record], ?], ManifestError, A]
 
   val igluCentralResolverConfig = parse(
     """
@@ -84,6 +74,8 @@ object SpecHelpers {
     """.stripMargin)
 
   val igluEmbeddedResolver = Resolver.parse(igluEmbeddedResolverConfig).toOption.get
+
+  object TestManifest extends PureManifest(igluEmbeddedResolver)
 
   def prettyPrint(a: Any, indentSize: Int = 2, maxElementWidth: Int = 30, depth: Int = 0): String = {
     val indent = " " * depth * indentSize

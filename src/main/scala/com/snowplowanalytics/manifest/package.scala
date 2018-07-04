@@ -13,11 +13,14 @@
 package com.snowplowanalytics
 
 import cats.MonadError
-import cats.data.NonEmptyList
+import cats.data.{ NonEmptyList, EitherT, StateT }
 import cats.implicits._
-import cats.effect.Sync
+import cats.effect.{ Sync, IO }
+
 import io.circe.Json
+
 import fs2._
+
 import com.snowplowanalytics.iglu.core.SelfDescribingData
 
 import manifest.core._

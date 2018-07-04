@@ -10,26 +10,28 @@
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the Apache License Version 2.0 for the specific language governing permissions and limitations there under.
  */
-package com.snowplowanalytics
-package manifest
+package com.snowplowanalytics.manifest
+package pure
 
 import java.util.UUID
 import java.time.Instant
 
-import cats.data.{StateT, EitherT, NonEmptyList}
+import cats.data.{EitherT, NonEmptyList, StateT}
 import cats.effect.{IO, Sync}
 import cats.implicits._
 
+import com.snowplowanalytics.iglu.client.Resolver
+
 import core._
 import core.ProcessingManifest._
-
-import SpecHelpers._
+import PureManifest._
 
 /**
   * Manifest implementation keeping all records in `State` monad.
   * IO in type-signature should be ignored as required only by `fs2.Stream#compile`
+  * Use for tests only!
   */
-object PureManifest extends ProcessingManifest[PureManifestEffect](SpecHelpers.igluEmbeddedResolver) with PureManifest {
+case class PureManifest(override val resolver: Resolver) extends ProcessingManifest[PureManifestEffect](resolver) with PureManifest.Impl {
 
   def apply(records: List[Record]): PureManifestEffect[List[Record]] =
     EitherT.right(StateT.set[IO, List[Record]](records)).map(_ => records)
@@ -73,52 +75,66 @@ object PureManifest extends ProcessingManifest[PureManifestEffect](SpecHelpers.i
   }
 }
 
-trait PureManifest {
+object PureManifest {
 
-  def getItemS(id: ItemId): ManifestState[List[Record], Option[Item]] = {
-    ManifestState((records: List[Record]) => {
-      val item = records.filter(_.itemId == id) match {
-        case Nil => None
-        case h :: t => Some(Item(NonEmptyList(h, t)))
-      }
-      (records, item)
-    })
+  // IO is temporary here, due unnecessary Sync restriction from ProcessingManifest
+  type ManifestState[S, A] = StateT[IO, S, A]
+
+  object ManifestState {
+    def apply[S, A](f: S => (S, A)): ManifestState[S, A] =
+      StateT[IO, S, A](s => IO(f(s)))
   }
 
-  def putS(itemId: ItemId,
-           app: Application,
-           parentRecordId: Option[UUID],
-           step: core.State,
-           author: Option[Agent],
-           payload: Option[Payload]): ManifestState[List[Record], (UUID, Instant)] = {
+  type PureManifestEffect[A] = EitherT[ManifestState[List[Record], ?], ManifestError, A]
 
-    val a = Author(author.getOrElse(app.agent), ProcessingManifest.Version)
-    def f(records: List[Record]) = {
-      val id = seed(records.toSet)
-      val timestamp = time(records.toSet)
-      val newRecord = Record(itemId, app, id, parentRecordId, step, timestamp, a, payload)
-      (newRecord :: records, (id, timestamp))
+  trait Impl {
+
+    val StartTime = Instant.ofEpochMilli(1524870034204L)
+
+    def getItemS(id: ItemId): ManifestState[List[Record], Option[Item]] = {
+      ManifestState((records: List[Record]) => {
+        val item = records.filter(_.itemId == id) match {
+          case Nil => None
+          case h :: t => Some(Item(NonEmptyList(h, t)))
+        }
+        (records, item)
+      })
     }
-    ManifestState(f)
-  }
 
-  def listS: ManifestState[List[Record], List[Record]] = {
-    def f(records: List[Record]) = (records, records)
-    ManifestState(f)
-  }
+    def putS(itemId: ItemId,
+             app: Application,
+             parentRecordId: Option[UUID],
+             step: core.State,
+             author: Option[Agent],
+             payload: Option[Payload]): ManifestState[List[Record], (UUID, Instant)] = {
 
-  val StartTime = Instant.ofEpochMilli(1524870034204L)
-  def id(num: Int): UUID = UUID.nameUUIDFromBytes(Array(java.lang.Byte.valueOf(num.toString)))
+      val a = Author(author.getOrElse(app.agent), ProcessingManifest.Version)
+      def f(records: List[Record]) = {
+        val id = seed(records.toSet)
+        val timestamp = time(records.toSet)
+        val newRecord = Record(itemId, app, id, parentRecordId, step, timestamp, a, payload)
+        (newRecord :: records, (id, timestamp))
+      }
+      ManifestState(f)
+    }
 
-  def seed(set: Set[_]): UUID = id(set.size)
-  def time(set: Set[_]): Instant = time(set.size)
-  def time(int: Int): Instant =  StartTime.plusSeconds(int)
+    def listS: ManifestState[List[Record], List[Record]] = {
+      def f(records: List[Record]) = (records, records)
+      ManifestState(f)
+    }
 
-  implicit class PureManifestRunner[A](action: PureManifestEffect[A]) {
-    def run(records: List[Record]): Either[ManifestError, A] =
-      runWithState(records)._2
+    def id(num: Int): UUID = UUID.nameUUIDFromBytes(Array(java.lang.Byte.valueOf(num.toString)))
 
-    def runWithState(records: List[Record]): (List[Record], Either[ManifestError, A]) =
-      action.value.run(records).unsafeRunSync()
+    def seed(set: Set[_]): UUID = id(set.size)
+    def time(set: Set[_]): Instant = time(set.size)
+    def time(int: Int): Instant =  StartTime.plusSeconds(int)
+
+    implicit class PureManifestRunner[A](action: PureManifestEffect[A]) {
+      def run(records: List[Record]): Either[ManifestError, A] =
+        runWithState(records)._2
+
+      def runWithState(records: List[Record]): (List[Record], Either[ManifestError, A]) =
+        action.value.run(records).unsafeRunSync()
+    }
   }
 }

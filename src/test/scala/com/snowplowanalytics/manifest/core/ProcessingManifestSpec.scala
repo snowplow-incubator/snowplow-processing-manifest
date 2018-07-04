@@ -27,8 +27,8 @@ import com.snowplowanalytics.iglu.core.{ SelfDescribingData, SchemaVer, SchemaKe
 
 import org.specs2.Specification
 
-import PureManifest._
-import SpecHelpers.AssetVersion
+import SpecHelpers.{ AssetVersion, TestManifest }
+import SpecHelpers.TestManifest._
 
 class ProcessingManifestSpec extends Specification { def is = s2"""
   getUnprocessed identifies unprocessed Item $e1
@@ -43,6 +43,9 @@ class ProcessingManifestSpec extends Specification { def is = s2"""
   query respects Skipped records with instanceId $e10
   query can be used to query only by processedBy $e11
   query can be used to query only by requestedBy $e12
+  getUnprocessed identifies failed Item without preparedBy criterion $e13
+  processNewItem does NOT identify failed Item $e14
+  getUnprocessed identifies failed Item with preparedBy criterion $e15
   """
 
   def e1 = {
@@ -53,13 +56,13 @@ class ProcessingManifestSpec extends Specification { def is = s2"""
       Record("1", Application(agent, None), id(1), id(0).some, State.Processing, time(1), author, None),
       Record("1", Application(agent, None), id(2), id(1).some, State.Processed, time(2), author, None))
 
-    val idsForLoader = PureManifest.query(None, Application("rdb-loader", "0.14.0").some)
-    val idsForShredder = PureManifest.query(None, Application("rdb-shredder", "0.13.0").some)
+    val idsForLoader = TestManifest.query(None, Application("rdb-loader", "0.14.0").some)
+    val idsForShredder = TestManifest.query(None, Application("rdb-shredder", "0.13.0").some)
 
-    val newAppExpectation = PureManifest
+    val newAppExpectation = TestManifest
       .getUnprocessed(idsForLoader, _ => true)
       .run(records) must beRight(List(Item(NonEmptyList.fromListUnsafe(records))))
-    val oldAppExpectation = PureManifest
+    val oldAppExpectation = TestManifest
       .getUnprocessed(idsForShredder, _ => true)
       .run(records) must beRight(Nil)
 
@@ -75,13 +78,13 @@ class ProcessingManifestSpec extends Specification { def is = s2"""
       Record("1", Application(agent, None), id(1), id(0).some, State.Processing, time(1), author, None))
     val lockingRecord = NonEmptyList(records.get(1).get, Nil)
 
-    val idsForLoader = PureManifest.query(None, Application("rdb-loader", "0.13.0").some)
-    val idsForShredder = PureManifest.query(None, Application("rdb-loader", "0.14.0").some)
+    val idsForLoader = TestManifest.query(None, Application("rdb-loader", "0.13.0").some)
+    val idsForShredder = TestManifest.query(None, Application("rdb-loader", "0.14.0").some)
 
-    val newAppExpectation = PureManifest
+    val newAppExpectation = TestManifest
       .getUnprocessed(idsForLoader, _ => true)
       .run(records) must beLeft(ManifestError.Locked(lockingRecord, None))
-    val oldAppExpectation = PureManifest
+    val oldAppExpectation = TestManifest
       .getUnprocessed(idsForShredder, _ => true)
       .run(records) must beLeft(ManifestError.Locked(lockingRecord, None))
 
@@ -102,15 +105,15 @@ class ProcessingManifestSpec extends Specification { def is = s2"""
     val process = () => { Try { Some(processedPayload) } }
 
     val manifest = for {
-      _ <- PureManifest.processNewItem("a", app, Some(payload), process)
+      _ <- TestManifest.processNewItem("a", app, Some(payload), process)
     } yield ()
 
     val (records, result) = manifest.value.run(List.empty).unsafeRunSync().toOption.get
 
     val expectedRecords = List(
-      Record("a",app, PureManifest.id(0), None, State.New,PureManifest.StartTime, author, None),
-      Record("a",app, PureManifest.id(1), None, State.Processing, PureManifest.StartTime.plusSeconds(1), author, Some(payload)),
-      Record("a",app, PureManifest.id(2), Some(PureManifest.id(1)), State.Processed,PureManifest.StartTime.plusSeconds(2),author,Some(processedPayload))
+      Record("a",app, TestManifest.id(0), None, State.New,TestManifest.StartTime, author, None),
+      Record("a",app, TestManifest.id(1), None, State.Processing, TestManifest.StartTime.plusSeconds(1), author, Some(payload)),
+      Record("a",app, TestManifest.id(2), Some(TestManifest.id(1)), State.Processed,TestManifest.StartTime.plusSeconds(2),author,Some(processedPayload))
     )
 
     val success = result must beRight
@@ -141,8 +144,8 @@ class ProcessingManifestSpec extends Specification { def is = s2"""
       Record("3", newApp, id(6), id(5).some, State.Processed, time(6), newAuthor, None))
 
     val result = for {
-      _ <- PureManifest.processAll(Application("test-process-function", "0.1.0"), Item.processedBy(Application("rdb-shredder", ""), _), None, process)
-      records <- PureManifest.items.map(_.values.flatMap(_.records.toList).toList)
+      _ <- TestManifest.processAll(Application("test-process-function", "0.1.0"), Item.processedBy(Application("rdb-shredder", ""), _), None, process)
+      records <- TestManifest.items.map(_.values.flatMap(_.records.toList).toList)
     } yield records
 
     result.run(records) must beRight {
@@ -193,17 +196,17 @@ class ProcessingManifestSpec extends Specification { def is = s2"""
       processedData)
     val process = () => { Try { Some(processedPayload) } }
 
-    val newRecord = Record("a",app, PureManifest.id(0), None, State.New,PureManifest.StartTime, author, None)
+    val newRecord = Record("a",app, TestManifest.id(0), None, State.New,TestManifest.StartTime, author, None)
     val manifest = for {
-      _ <- PureManifest.processNewItem("a", app, Some(payload), process)
+      _ <- TestManifest.processNewItem("a", app, Some(payload), process)
     } yield ()
 
     val (records, result) = manifest.value.run(List(newRecord)).unsafeRunSync().toOption.get
 
     val expectedRecords = List(
       newRecord,
-      Record("a",app, PureManifest.id(1), None, State.Processing, PureManifest.StartTime.plusSeconds(1), author, Some(payload)),
-      Record("a",app, PureManifest.id(2), Some(PureManifest.id(1)), State.Processed,PureManifest.StartTime.plusSeconds(2),author,Some(processedPayload))
+      Record("a",app, TestManifest.id(1), None, State.Processing, TestManifest.StartTime.plusSeconds(1), author, Some(payload)),
+      Record("a",app, TestManifest.id(2), Some(TestManifest.id(1)), State.Processed,TestManifest.StartTime.plusSeconds(2),author,Some(processedPayload))
     )
 
     val success = result must beRight
@@ -223,14 +226,14 @@ class ProcessingManifestSpec extends Specification { def is = s2"""
     val process = () => { Try { throw exception } }
 
     val manifest = for {
-      _ <- PureManifest.processNewItem("a", app, Some(payload), process)
+      _ <- TestManifest.processNewItem("a", app, Some(payload), process)
     } yield ()
 
     val (records, result) = manifest.value.run(Nil).unsafeRunSync().toOption.get
 
     val expectedRecords = List(
-      Record("a",app, PureManifest.id(0), None, State.New,PureManifest.StartTime, author, None),
-      Record("a",app, PureManifest.id(1), None, State.Processing, PureManifest.StartTime.plusSeconds(1), author, Some(payload))
+      Record("a",app, TestManifest.id(0), None, State.New,TestManifest.StartTime, author, None),
+      Record("a",app, TestManifest.id(1), None, State.Processing, TestManifest.StartTime.plusSeconds(1), author, Some(payload))
     )
 
     val failedRecord = records.find(_.state == State.Failed)
@@ -257,9 +260,9 @@ class ProcessingManifestSpec extends Specification { def is = s2"""
       Record("1", Application(agent, None), id(0), None, State.New, time(0), author, None),
       Record("1", Application(agent, None), id(1), id(0).some, State.Processing, time(1), author, None))
 
-    val ids = PureManifest.query(Application("rdb-shredder", "0.13.0").some, Application("rdb-loader", "0.13.0").some)
+    val ids = TestManifest.query(Application("rdb-shredder", "0.13.0").some, Application("rdb-loader", "0.13.0").some)
 
-    PureManifest
+    TestManifest
       .getUnprocessed(ids, _ => true)
       .run(records) must beRight(List.empty)
   }
@@ -275,7 +278,7 @@ class ProcessingManifestSpec extends Specification { def is = s2"""
       Record("1", Application(agent, None), id(2), id(1).some, State.Processed, time(2), author, None),
       Record("1", loader, id(3), id(2).some, State.Skipped, time(3), author, None))
 
-    PureManifest
+    TestManifest
       .query(Application("rdb-shredder", "0.13.0").some, Application("rdb-loader", "0.13.0").some)
       .compile.toList
       .run(records) must beRight(List.empty)
@@ -293,11 +296,11 @@ class ProcessingManifestSpec extends Specification { def is = s2"""
       Record("1", loader, id(3), None, State.Processing, time(3), author, None),
       Record("1", loader, id(4), id(3).some, State.Processed, time(4), author, None))
 
-    val presentIdIsExcluded = PureManifest
+    val presentIdIsExcluded = TestManifest
       .query(Application("rdb-shredder", "0.13.0").some, loader.some)
       .compile.toList
       .run(records) must beRight(List.empty)
-    val absentIdIsIncluded = PureManifest
+    val absentIdIsIncluded = TestManifest
       .query(Application("rdb-shredder", "0.13.0").some, loader.copy(instanceId = Some("id2")).some)
       .compile.toList
       .run(records) must beRight(List("1"))
@@ -321,7 +324,7 @@ class ProcessingManifestSpec extends Specification { def is = s2"""
 
     val records = itemOne ++ itemTwo
 
-    PureManifest
+    TestManifest
       .query(Application("rdb-shredder", "0.13.0").some, None)
       .compile.toList
       .run(records) must beRight(List("1", "2"))
@@ -344,10 +347,77 @@ class ProcessingManifestSpec extends Specification { def is = s2"""
 
     val records = itemOne ++ itemTwo
 
-    PureManifest
+    TestManifest
       .query(None, loader.some)   // without preparedBy restriction Loader can process anything that it didn't process yet
       .compile.toList
       .run(records) must beRight(List("1", "2"))
+  }
+
+  /** This property is important so that operators won't forget to recover an Item */
+  def e13 = {
+    val agent = Agent("rdb-shredder", "0.13.0")
+    val author = Author(agent, "0.1.0")
+    val shredder = Application(agent, None)
+
+    val records = List(
+      Record("1", shredder, id(0), None, State.New, time(0), author, None),
+      Record("1", shredder, id(1), id(0).some, State.Processing, time(1), author, None),
+      Record("1", shredder, id(2), id(1).some, State.Failed, time(2), author, None)
+    )
+    val lockingRecord = NonEmptyList(records.get(2).get, Nil)
+
+    val idsForLoader = TestManifest.query(None, Application("rdb-loader", "0.13.0").some)
+
+    val newAppExpectation = TestManifest
+      .getUnprocessed(idsForLoader, _ => true)
+      .run(records) must beLeft(ManifestError.Locked(lockingRecord, None))
+
+    newAppExpectation
+  }
+
+  /**
+    * Unlike getUnprocessed, processNewItem does not care about about previous failures,
+    * so starting apps (transformers) can add data, which will be processed by second apps
+    * (loaders) once failure is resolved
+    */
+  def e14 = {
+    val agent = Agent("rdb-shredder", "0.13.0")
+    val author = Author(agent, "0.1.0")
+
+    def process: ProcessingManifest.ProcessNew =
+      () => scala.util.Success(None)
+
+    val records = List(
+      Record("1", Application(agent, None), id(0), None, State.New, time(0), author, None),
+      Record("1", Application(agent, None), id(1), id(0).some, State.Processing, time(1), author, None),
+      Record("1", Application(agent, None), id(2), id(1).some, State.Failed, time(2), author, None)
+    )
+
+    TestManifest.processNewItem("2", Application("rdb-shredder", "0.14.0"), None, process).run(records) must beRight(())
+  }
+
+  /** This property does not hold because we query *already processed by*
+    * but would be nice to have eager failure check for performance reasons
+    */
+  def e15 = {
+    val agent = Agent("rdb-shredder", "0.13.0")
+    val author = Author(agent, "0.1.0")
+    val shredder = Application(agent, None)
+
+    val records = List(
+      Record("1", shredder, id(0), None, State.New, time(0), author, None),
+      Record("1", shredder, id(1), id(0).some, State.Processing, time(1), author, None),
+      Record("1", shredder, id(2), id(1).some, State.Failed, time(2), author, None)
+    )
+    val lockingRecord = NonEmptyList(records.get(2).get, Nil)
+
+    val idsForLoader = TestManifest.query(shredder.some, Application("rdb-loader", "0.13.0").some)
+
+    val newAppExpectation = TestManifest
+      .getUnprocessed(idsForLoader, _ => true)
+      .run(records) must beLeft(ManifestError.Locked(lockingRecord, None))
+
+    skipped("Implement in next version")
   }
 }
 

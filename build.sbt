@@ -13,7 +13,7 @@
 lazy val root = project.in(file("."))
   .settings(
     name := "snowplow-processing-manifest",
-    version := "0.1.0-M5",
+    version := "0.1.0-M6",
     organization := "com.snowplowanalytics",
     scalaVersion := "2.11.12",
     licenses += ("Apache-2.0", url("https://www.apache.org/licenses/LICENSE-2.0"))
