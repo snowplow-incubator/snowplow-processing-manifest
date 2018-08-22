@@ -54,6 +54,7 @@ object ManifestError {
     final case class InvalidRequest(message: String) extends Corruption
   }
 
+
   /** Exception happened during item processing. Not manifest error, technically */
   final case class ApplicationError(underlying: Throwable, app: Application, runId: UUID) extends ManifestError
 
@@ -69,10 +70,12 @@ object ManifestError {
     new Show[ManifestError] {
       def show(t: ManifestError): String = t match {
         case Locked(reason, None) =>
-          s"Manifest is locked and app cannot proceed due following unconsumed records ${reason.toList.mkString(", ")} " +
-            "Add `Resolved` record to proceed"
+          val recordList = reason.toList.map(_.show)
+          s"Manifest is locked and app cannot proceed due following unconsumed records:\n${recordList.mkString("\n")} " +
+            "\nResolve the problem and add `Resolved` record to proceed"
         case Locked(reason, Some(acquired)) =>
-          s"Manifest is locked and app cannot proceed due following unconsumed records ${reason.toList.mkString(", ")} " +
+          val recordList = reason.toList.map(_.show)
+          s"Manifest is locked and app cannot proceed due following unconsumed records:\n ${recordList.mkString("\n")} " +
             s"This is probably happened due race condition for $acquired. Safe to add `Resolved` record"
         case IoError(message) =>
           s"IO Error during communication with manifest. Contact system administrator\n$message"

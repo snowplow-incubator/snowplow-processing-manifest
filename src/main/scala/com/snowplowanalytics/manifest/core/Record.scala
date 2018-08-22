@@ -20,7 +20,7 @@ import io.circe._
 import io.circe.syntax._
 import io.circe.java8.time._
 
-import cats.Order
+import cats.{ Order, Show }
 import cats.implicits._
 
 import com.snowplowanalytics.iglu.client.Resolver
@@ -54,6 +54,13 @@ final case class Record(itemId: ItemId,
     case None => ().asRight
     case Some(json) => Payload.validate(resolver, json)
   }
+
+  /** Human-readable representation */
+  def show: String =
+    s"""|Item: $itemId
+        |Id: $recordId
+        |State: ${state.show}
+        |Application: ${application.show}""" ++ payload.fold("")(p => s"\nPayload:\n${p.data.spaces2}")
 }
 
 object Record {
@@ -114,4 +121,7 @@ object Record {
         DecodingFailure("Processing Manifest Record is not a JSON object", cursor.history).asLeft
     }
   }
+
+  implicit val recordShow: Show[Record] =
+    Show.show(_.show)
 }

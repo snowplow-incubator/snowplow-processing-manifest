@@ -160,9 +160,9 @@ class DynamoDbManifest[F[_]](val client: AmazonDynamoDB,
   }
 
   /** Add exact same record to manifest (low-level DynamoDB-specific API) */
-  def putRecord(r: Record): F[(UUID, Instant)] = {
+  def putRecord(r: Record)(implicit F: Sync[F]): F[(UUID, Instant)] = {
     val dbItem = createRecord(r.itemId, r.application, r.recordId, r.previousRecordId, r.state, r.timestamp, r.author, r.payload)
-    addRecord(r.recordId, r.timestamp, dbItem)
+    F.delay(addRecord(r.recordId, r.timestamp, dbItem)).flatten
   }
 
   /** Create Scan request (wrapped in `Sync` as non-referentially transparent) */

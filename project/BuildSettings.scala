@@ -63,7 +63,7 @@ object BuildSettings {
       "-target", "1.8",
       "-Xlint"
     ),
-    addCompilerPlugin("org.spire-math" %% "kind-projector" % "0.9.6")
+    addCompilerPlugin("org.spire-math" %% "kind-projector" % "0.9.7")
   )
 
   lazy val helpersSettings = Seq[Setting[_]](

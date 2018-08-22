@@ -23,7 +23,7 @@ import pure.PureManifest
 
 object SpecHelpers {
 
-  val AssetVersion: String = "0.1.0-M6"
+  val AssetVersion: String = "0.1.0-M7"
 
   type Action[A] = Either[ManifestError, A]
 
