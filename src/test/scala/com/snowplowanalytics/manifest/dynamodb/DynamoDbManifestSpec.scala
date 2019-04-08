@@ -30,6 +30,8 @@ import org.specs2.execute.{AsResult, Result}
 import org.specs2.specification.AroundEach
 
 import com.snowplowanalytics.manifest.core._
+import SpecHelpers._
+
 
 /** Integration test suite for DynamoDb */
 class DynamoDbManifestSpec extends Specification with AroundEach { def is = s2"""
@@ -69,7 +71,7 @@ class DynamoDbManifestSpec extends Specification with AroundEach { def is = s2""
         DynamoDbManifestSpec.intToState(i),
         None)
     }
-    val client = new DynamoDbManifest[ManifestIO](Client, TableName, SpecHelpers.igluCentralResolver)
+    val client = new DynamoDbManifest[ManifestIO](Client, TableName, SpecHelpers.igluCentralResolverIO)
     val putResult = records.map(record => client.put(record.id, record.app, None, record.stepState, None, record.payload)).toList.sequence
     val items = client.items
 
@@ -95,7 +97,7 @@ class DynamoDbManifestSpec extends Specification with AroundEach { def is = s2""
   def e3 = {
     def process(item: Item): Try[Option[Payload]] = Try(None)
 
-    val client = new DynamoDbManifest[ManifestIO](Client, TableName, SpecHelpers.igluCentralResolver)
+    val client = new DynamoDbManifest[ManifestIO](Client, TableName, SpecHelpers.igluCentralResolverIO)
     client.put("s3://folder", Application("manifest-test", "0.1.0-rc1"), None, State.New, None, None)
 
     // Two threads simultaneously set Processing for an item,
@@ -138,7 +140,7 @@ class DynamoDbManifestSpec extends Specification with AroundEach { def is = s2""
     def process(delayMs: Long): ProcessingManifest.Process =
       _ => Try { Thread.sleep(delayMs); None }
 
-    val client = new DynamoDbManifest[ManifestIO](Client, TableName, SpecHelpers.igluCentralResolver)
+    val client = new DynamoDbManifest[ManifestIO](Client, TableName, SpecHelpers.igluCentralResolverIO)
     client.put("s3://folder", Application("manifest-test", "0.1.0-rc1"), None, State.New, None, None)
 
     // Second thread tries to acquire lock when first already acquired (process is blocking),

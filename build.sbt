@@ -34,10 +34,10 @@ lazy val root = project.in(file("."))
       Dependencies.cats,
       Dependencies.fs2,
       Dependencies.igluClient,
-      Dependencies.igluCore,
-      Dependencies.igluCoreCirce,
 
       Dependencies.specs2,
+      Dependencies.circeLiteral,
+      Dependencies.circeJawn,
       Dependencies.specs2Scalacheck,
       Dependencies.scalaCheck
     )

@@ -18,11 +18,10 @@ object Dependencies {
     // Java
     val dynamodb         = "1.11.319"
     // Scala
-    val circe            = "0.9.3"
-    val cats             = "1.1.0"
-    val fs2              = "0.10.5"
-    val igluClient       = "0.5.0"
-    val igluCore         = "0.2.0"
+    val circe            = "0.11.1"
+    val cats             = "1.6.1"
+    val fs2              = "1.0.5"
+    val igluClient       = "0.6.0"
     // Scala (test only)
     val specs2           = "4.3.3"
     val scalaCheck       = "1.13.4"
@@ -36,11 +35,11 @@ object Dependencies {
   val cats             = "org.typelevel"              %% "cats-core"            % V.cats
   val fs2              = "co.fs2"                     %% "fs2-core"             % V.fs2
   val igluClient       = "com.snowplowanalytics"      %% "iglu-scala-client"    % V.igluClient
-  val igluCore         = "com.snowplowanalytics"      %% "iglu-core"            % V.igluCore
-  val igluCoreCirce    = "com.snowplowanalytics"      %% "iglu-core-circe"      % V.igluCore
   // Java
   val dynamodb         = "com.amazonaws"              % "aws-java-sdk-dynamodb" % V.dynamodb
   // Scala (test only)
+  val circeLiteral     = "io.circe"                   %% "circe-literal"        % V.circe          % "test"
+  val circeJawn        = "io.circe"                   %% "circe-jawn"           % V.circe
   val specs2           = "org.specs2"                 %% "specs2-core"          % V.specs2         % "test"
   val specs2Scalacheck = "org.specs2"                 %% "specs2-scalacheck"    % V.specs2         % "test"
   val scalaCheck       = "org.scalacheck"             %% "scalacheck"           % V.scalaCheck     % "test"

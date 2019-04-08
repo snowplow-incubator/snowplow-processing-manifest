@@ -15,14 +15,19 @@ package com.snowplowanalytics.manifest.core
 import java.util.UUID
 import java.time.Instant
 
-import io.circe.parser.parse
+import io.circe.Json
+import io.circe.literal._
+import io.circe.syntax._
 
 import cats.implicits._
 import cats.data.NonEmptyList
 
-import com.snowplowanalytics.iglu.core.circe.implicits._
+import com.snowplowanalytics.iglu.client.ClientError
+import com.snowplowanalytics.iglu.core.{SchemaKey, SchemaVer, SelfDescribingData}
 
 import com.snowplowanalytics.manifest.SpecHelpers
+import com.snowplowanalytics.manifest.SpecHelpers._
+import com.snowplowanalytics.manifest.pure.PureManifest._
 
 import org.specs2.Specification
 
@@ -37,15 +42,14 @@ class ItemSpec extends Specification { def is = s2"""
   """
 
   def e1 = {
-    import com.snowplowanalytics.iglu.core.circe.implicits._
 
-    val payload1 = parse(
-      """{"schema": "iglu:com.snowplowanalytics.snowplow/geolocation_context/jsonschema/1-0-0","data":{"latitude": 91}} """.stripMargin)
-      .right.toOption.flatMap(_.toData)
+    val payload1 = SelfDescribingData[Json](
+      SchemaKey("com.snowplowanalytics.snowplow", "geolocation_context", "jsonschema", SchemaVer.Full(1,0,0)),
+      json"""{"latitude": 91}""").some
 
-    val payload2 = parse(
-      """{"schema": "iglu:com.snowplowanalytics.snowplow/geolocation_context/jsonschema/1-0-0","data":{"latitude": 91, "longitude": 1}} """.stripMargin)
-      .right.toOption.flatMap(_.toData)
+    val payload2 = SelfDescribingData[Json](
+      SchemaKey("com.snowplowanalytics.snowplow", "geolocation_context", "jsonschema", SchemaVer.Full(1,0,0)),
+      json"""{"latitude": 91, "longitude": 1}""").some
 
     val id1 = UUID.randomUUID()
     val id2 = UUID.randomUUID()
@@ -62,7 +66,9 @@ class ItemSpec extends Specification { def is = s2"""
       Record("a", Application("app", "0.1.0"), id5, Some(id4), State.Processed, time, Author(Agent("app", "0.1.0"), "0.1.0-rc1"), payload2)
     )
 
-    Item(NonEmptyList.fromListUnsafe(records)).ensure[SpecHelpers.Action](SpecHelpers.igluCentralResolver) must beLeft.like {
+    Item(NonEmptyList.fromListUnsafe(records))
+      .ensure[PureManifestEffect](igluCentralResolver.runEffect.fold(throw _, identity))
+      .runEffect must beLeft.like {
       case ManifestError.Corrupted(ManifestError.Corruption.InvalidContent(errors)) =>
         errors.toList must haveSize(2)
       case _ => ko("Item should have exactly two corrupted errors")
@@ -136,13 +142,9 @@ class ItemSpec extends Specification { def is = s2"""
     val id2 = UUID.randomUUID()
     val orphanId = UUID.fromString("8e6ddfb2-f86a-4916-a3c3-1db65eb66a76")
 
-    val payload = parse(
-      """
-        |{
-        |  "schema": "iglu:com.snowplowanalytics.snowplow/geolocation_context/jsonschema/1-0-0",
-        |  "data": {"latitude": 91}
-        |}
-      """.stripMargin).right.toOption.flatMap(_.toData).get
+    val payload = SelfDescribingData[Json](
+      SchemaKey("com.snowplowanalytics.snowplow", "geolocation_context", "jsonschema", SchemaVer.Full(1,0,0)),
+      json"""{"latitude": 91}""")
 
     val time = Instant.now()
     val records = List(
@@ -151,23 +153,26 @@ class ItemSpec extends Specification { def is = s2"""
       Record("a", Application("app", "0.1.0"), orphanId, None, State.Failed, time, Author(Agent("app", "0.1.0"), "0.1.0-rc1"), None)
     )
 
-    val igluError =
-      """Iglu error for iglu:com.snowplowanalytics.snowplow/geolocation_context/jsonschema/1-0-0: """ ++
-        """{"level":"error",""" ++
-        """"schema":{"loadingURI":"#","pointer":""},""" ++
-        """"instance":{"pointer":""},""" ++
-        """"domain":"validation",""" ++
-        """"keyword":"required",""" ++
-        """"message":"object has missing required properties ([\"longitude\"])",""" ++
-        """"required":["latitude","longitude"],""" ++
-        """"missing":["longitude"]}"""
+    import com.snowplowanalytics.iglu.client.ClientError._
+    import com.snowplowanalytics.iglu.client.validator.ValidatorReport
+    import com.snowplowanalytics.iglu.client.validator.ValidatorError.InvalidData
+
+    val igluError: ClientError =
+      ValidationError(
+        InvalidData(
+          NonEmptyList.of(
+            ValidatorReport("$.longitude: is missing but it is required",Some("$"),List("longitude"),Some("required")),
+            ValidatorReport("$.latitude: must have a maximum value of 90",Some("$.latitude"),List("90"),Some("maximum"))))
+      )
 
     val consistencyError =
       "Record 8e6ddfb2-f86a-4916-a3c3-1db65eb66a76 with state Failed has no previous record"
 
-    Item(NonEmptyList.fromListUnsafe(records)).ensure[SpecHelpers.Action](SpecHelpers.igluCentralResolver) must beLeft.like {
+    Item(NonEmptyList.fromListUnsafe(records))
+      .ensure[PureManifestEffect](igluCentralResolver.runEffect.fold(throw _, identity))
+      .runEffect must beLeft.like {
       case ManifestError.Corrupted(ManifestError.Corruption.InvalidContent(errors)) =>
-        errors.toList must containAllOf(List(igluError, consistencyError))
+        errors.toList must containAllOf(List(igluError.asJson.noSpaces, consistencyError))
 
     }
   }

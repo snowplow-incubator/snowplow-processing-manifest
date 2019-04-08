@@ -17,18 +17,18 @@ import cats.implicits._
 import io.circe._
 
 import com.snowplowanalytics.iglu.client.Resolver
-import com.snowplowanalytics.iglu.client.repositories.{EmbeddedRepositoryRef, RepositoryRefConfig}
+import com.snowplowanalytics.iglu.client.resolver.registries.Registry
 
 /** Helper functions */
 object Common {
 
-  private val resolverRefConf = RepositoryRefConfig("Processing Manifest Embedded", 0, List("com.snowplowanalytics"))
+  private val resolverRefConf = Registry.Config("Processing Manifest Embedded", 0, List("com.snowplowanalytics"))
 
   /** Registry embedded into Processing Manifest jar */
-  val EmbeddedRegistry = EmbeddedRepositoryRef(resolverRefConf, "/com.snowplowanalytics.manifest/embedded-registry")
+  val EmbeddedRegistry = Registry.Embedded(resolverRefConf, "/com.snowplowanalytics.manifest/embedded-registry")
 
   /** Iglu Resolver containing all schemas processing manifest uses */
-  val DefaultResolver = Resolver(10, EmbeddedRegistry)
+  val DefaultResolver = Resolver(List(EmbeddedRegistry), None)    // TODO: F
 
   def decodeKey[A: Decoder](map: Map[String, Json], cursor: HCursor)(key: String): Decoder.Result[A] =
     map.get(key).map(_.as[A]) match {

@@ -13,9 +13,9 @@
 package com.snowplowanalytics
 
 import cats.MonadError
-import cats.data.{ NonEmptyList, EitherT, StateT }
+import cats.data.NonEmptyList
 import cats.implicits._
-import cats.effect.{ Sync, IO }
+import cats.effect.Sync
 
 import io.circe.Json
 

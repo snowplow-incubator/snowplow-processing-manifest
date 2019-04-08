@@ -17,7 +17,6 @@ import java.util.UUID
 
 import scala.language.higherKinds
 import scala.collection.convert.decorateAsJava._
-import scala.collection.convert.decorateAsScala._
 
 import cats.implicits._
 
@@ -26,11 +25,6 @@ import io.circe.syntax._
 
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.node._
-
-import com.github.fge.jsonschema.core.report.ProcessingMessage
-
-import com.snowplowanalytics.iglu.client.Resolver
-import com.snowplowanalytics.iglu.client.validation.ValidatableJsonMethods
 
 import com.snowplowanalytics.iglu.core.{SchemaKey, SchemaVer, SelfDescribingData}
 import com.snowplowanalytics.iglu.core.circe.implicits._
@@ -76,57 +70,7 @@ object Payload {
     SelfDescribingData(LockedSchemaKey, JsonObject.fromMap(Map("recordId" -> lockedBy.asJson)).asJson)
 
   def parse(json: Json): Either[String, Payload] =
-    json.toData.fold("Not valid self-describing JSON in payload".asLeft[SelfDescribingData[Json]])(_.asRight[String])
-
-  /** Validate Record's payload against its schema */
-  private[core] def validate(resolver: Resolver, payload: Payload): Either[String, Unit] = {
-    payload.schema.version match {
-      case _: SchemaVer.Full =>
-        val jsonNodeInstance = circeToJackson(payload.normalize)
-        ValidatableJsonMethods.validate(jsonNodeInstance, dataOnly = false)(resolver) match {
-          case scalaz.Success(_) =>
-            ().asRight
-          case scalaz.Failure(messages) =>
-            errorFromProcessMessages(messages, payload.schema).asLeft
-        }
-      case _: SchemaVer.Partial =>
-        s"Iglu error for ${payload.schema.toSchemaUri}: processing manifest does not support partial versions".asLeft
-    }
-  }
-
-  /** Turn Jackson JsonNode into Circe JSON. Does not handle long numbers (> Int.MaxValue) well */
-  def jacksonToCirce(jsonNode: JsonNode): Json = {
-    jsonNode.getNodeType match {
-      case JsonNodeType.ARRAY =>
-        val values = jsonNode.elements().asScala.map(jacksonToCirce).toVector
-        Json.arr(values: _*)
-      case JsonNodeType.BOOLEAN =>
-        Json.fromBoolean(jsonNode.asBoolean)
-      case JsonNodeType.STRING =>
-        Json.fromString(jsonNode.asText)
-      case JsonNodeType.NULL =>
-        Json.Null
-      case JsonNodeType.NUMBER =>
-        if (jsonNode.isBigDecimal) {
-          Json.fromBigDecimal(jsonNode.decimalValue())
-        } else if (jsonNode.isBigInteger) {
-          Json.fromBigInt(jsonNode.bigIntegerValue())
-        } else if (jsonNode.isDouble) {
-          Json.fromDouble(jsonNode.asDouble).getOrElse(Json.Null)
-        } else if (jsonNode.isFloat) {
-          Json.fromFloat(jsonNode.floatValue).getOrElse(Json.Null)
-        } else if (jsonNode.isInt) {
-          Json.fromInt(jsonNode.asInt)
-        } else {
-          Json.fromDouble(jsonNode.asDouble).getOrElse(Json.Null)
-        }
-      case JsonNodeType.OBJECT =>
-        val fields = jsonNode.fields().asScala.map(m => (m.getKey, jacksonToCirce(m.getValue)))
-        Json.obj(fields.toList: _*)
-      case _ =>
-        Json.Null
-    }
-  }
+    SelfDescribingData.parse(json).leftMap(c => s"Not valid self-describing JSON in payload, $c")
 
   /** Turn Jackson JsonNode into Circe JSON. Does not handle long numbers (> Int.MaxValue) well */
   def circeToJackson(json: Json): JsonNode = {
@@ -153,12 +97,6 @@ object Payload {
         new ObjectNode(factory, javaMap)
       }
     )
-  }
-
-  private def errorFromProcessMessages(scalazNel: scalaz.NonEmptyList[ProcessingMessage],
-                                       schemaKey: SchemaKey): String = {
-    val errors = scalazNel.list.map(message => jacksonToCirce(message.asJson).noSpaces).mkString(", ")
-    s"Iglu error for ${schemaKey.toSchemaUri}: $errors"
   }
 
   private def stackTraceToString(e: Throwable): Option[String] =

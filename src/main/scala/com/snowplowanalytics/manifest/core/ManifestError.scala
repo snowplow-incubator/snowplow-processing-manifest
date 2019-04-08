@@ -22,7 +22,7 @@ import cats.implicits._
 import cats.data.NonEmptyList
 
 /** ADT representing error states */
-sealed trait ManifestError
+sealed trait ManifestError extends Throwable
 
 object ManifestError {
   /**
