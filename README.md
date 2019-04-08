@@ -93,5 +93,5 @@ limitations under the License.
 [license]: http://www.apache.org/licenses/LICENSE-2.0
 [license-image]: http://img.shields.io/badge/license-Apache--2-blue.svg?style=flat
 
-[release-image]: http://img.shields.io/badge/release-0.1.0-blue.svg?style=flat
+[release-image]: http://img.shields.io/badge/release-0.2.0-blue.svg?style=flat
 [releases]: https://github.com/snowplow-incubator/snowplow-processing-manifest/releases
