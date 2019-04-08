@@ -1,6 +1,6 @@
 language: scala
 scala:
-- 2.11.12
+- 2.12.8
 jdk:
 - oraclejdk8
 before_script:
@@ -13,7 +13,7 @@ deploy:
   script: ./.travis/deploy.sh $TRAVIS_TAG
   on:
     tags: true
-    condition: '"${TRAVIS_SCALA_VERSION}" == "2.11.12" && "${TRAVIS_JDK_VERSION}" == "oraclejdk8"'
+    condition: '"${TRAVIS_SCALA_VERSION}" == "2.12.8" && "${TRAVIS_JDK_VERSION}" == "oraclejdk8"'
 env:
   global:
   - secure: HC0qAup5Xmd00W6opHApcjRr29EDENrM5CmUhBfRkyayt1zoKLGfIs2nxiNcKKNBh1jCY4zE5JSahOefEvgTsbmKsuPAkBQa0TsPmldSHvcMEhyX9yxneVuZwQjfLdYP08ocJqMbGaDRHOzpbMyKT+/KDSinE85yzKp6mtZ0dAG26hymKI5vzJBi6ELF1z5f1DwlNLDQShifPj7NqQRL7lEuwf3MuPgD/4Mzse49fFxi1zr9wlHfcoOy0NyLcaPMpE6lfXszpnS9B0Tx/PvTL0UQhbbT8WdE+88VxZoXHewWDrpEFNHTTMGG1qwKaplcXxQnl3aHJoVNOm0ElReFvTvyHGA9FqVM3hO637sJc5m6hsgSpr3hjubtwDmTZeogrdp3vqzjtc1jaLY5wC94FJUiHORk1ogarasQaoL7nnLudiv3XvVOp+ts7c2OzG/BmepQlh+/gGGrGvmV2CKm56B3TikyxkOvfg7vxQvBuuecg5WGT5OGNGXovwifrLfGOM7/O5mdK6juszE/IJG1WacTfr6MishoZZdm0NKxiyyMeEFNDW9IJRznDX/P8gYvOiDmSox0qBLwHBhVdmU51QYorHKYkOUmVwEep1ukvwx1tI2lbzLDixb6Ur8YniLcrcm7emVjIN2jBWXOFpx97+hr4vwruOLmIxIH7NbOUew=
