@@ -20,6 +20,9 @@ import com.snowplowanalytics.iglu.client.Resolver
 import cats.Show
 import cats.data._
 import cats.implicits._
+import cats.effect.Clock
+
+import com.snowplowanalytics.iglu.client.resolver.registries.RegistryLookup
 
 import ProcessingManifest._
 import ManifestError._
@@ -40,20 +43,24 @@ final case class Item private[core](orderedRecords: Item.OrderedRecords) {
   def id: ItemId = records.head.itemId
 
   /** Perform additional check to ensure `Item` is not corrupted */
-  def ensure[F[_]: ManifestAction](resolver: Resolver): F[Item] = {
+  def ensure[F[_]: ManifestAction: RegistryLookup: Clock](resolver: Resolver[F]): F[Item] = {
     val sorted = records.toList
 
-    val itemIdValidation: ValidatedNel[String, Unit] = Item.checkItemId(sorted).toValidatedNel
-    val payloads: ValidatedNel[String, Unit] = sorted.map(_.ensurePayload(resolver).toValidatedNel).sequence.void
-    val parentIdsValidation: ValidatedNel[String, Unit] = Item.checkStateConsistency(sorted).toValidated
 
-    (itemIdValidation, payloads, parentIdsValidation).mapN { (_, _, _) =>
-      Item(NonEmptyList.fromListUnsafe(sorted))
-    } match {
-      case Validated.Valid(item) => item.pure[F]
-      case Validated.Invalid(errors) =>
-        val error: ManifestError = ManifestError.Corrupted(Corruption.InvalidContent(errors))
-        error.raiseError[F, Item]
+    val itemIdValidation: ValidatedNel[String, Unit] = Item.checkItemId(sorted).toValidatedNel
+    val parentIdsValidation: ValidatedNel[String, Unit] = Item.checkStateConsistency(sorted).toValidated
+    val payloadsF: F[ValidatedNel[String, Unit]] =
+      sorted.map(_.ensurePayload(resolver).value.map(_.toValidatedNel)).sequence.map(_.sequence_)
+
+    payloadsF.flatMap { payloads =>
+      (itemIdValidation, payloads, parentIdsValidation).mapN { (_, _, _) =>
+        Item(NonEmptyList.fromListUnsafe(sorted))
+      } match {
+        case Validated.Valid(item) => item.pure[F]
+        case Validated.Invalid(errors) =>
+          val error: ManifestError = ManifestError.Corrupted(Corruption.InvalidContent(errors))
+          error.raiseError[F, Item]
+      }
     }
   }
 

@@ -20,12 +20,19 @@ import io.circe._
 import io.circe.syntax._
 import io.circe.java8.time._
 
-import cats.{ Order, Show }
+import cats.{Order, Show, Monad}
+import cats.data.EitherT
 import cats.implicits._
+import cats.effect.Clock
 
-import com.snowplowanalytics.iglu.client.Resolver
+import com.snowplowanalytics.iglu.client.{ Resolver, Client, ClientError }
+import com.snowplowanalytics.iglu.client.validator.CirceValidator
+import com.snowplowanalytics.iglu.client.resolver.registries.RegistryLookup
+
+import com.snowplowanalytics.iglu.core.SelfDescribingData
 import com.snowplowanalytics.iglu.core.circe.implicits._
-import com.snowplowanalytics.iglu.core.circe.instances.igluNormalizeDataJValue
+
+
 
 /**
   * Atomic unit of `Item`. Usually represented as immutable row in a DB table (manifest)
@@ -50,10 +57,11 @@ final case class Record(itemId: ItemId,
                         author: Author,
                         payload: Option[Payload]) {
   /** Check that payload conforms its schema */
-  private[core] def ensurePayload(resolver: Resolver): Either[String, Unit] = payload match {
-    case None => ().asRight
-    case Some(json) => Payload.validate(resolver, json)
+  private[core] def ensurePayload[F[_]: Monad: RegistryLookup: Clock](resolver: Resolver[F]): EitherT[F, String, Unit] = payload match {
+    case None => ().asRight.toEitherT[F]
+    case Some(json) => Client(resolver, CirceValidator).check(json).leftMap(_.asJson.noSpaces)
   }
+
 
   /** Human-readable representation */
   def show: String =
@@ -87,7 +95,7 @@ object Record {
         StateKey            -> state.asJson,
         TimestampKey        -> timestamp.asJson,
         AuthorKey           -> author.asJson,
-        PayloadKey          -> payload.map(igluNormalizeDataJValue.normalize).getOrElse(Json.Null)
+        PayloadKey          -> payload.map(_.normalize).getOrElse(Json.Null)
       )
   }
 
@@ -108,10 +116,10 @@ object Record {
           p <- fold[Option[Json]](PayloadKey)
           d <- p match {
             case None => None.asRight
-            case Some(json) => json.toData match {
-              case Some(data) => data.some.asRight
-              case None =>
-                val message = s"Payload [$json] does not match self-describing JSON format"
+            case Some(json) => SelfDescribingData.parse(json) match {
+              case Right(data) => data.some.asRight
+              case Left(e) =>
+                val message = s"Payload [$json] does not match self-describing JSON format, ${e.code}"
                 DecodingFailure(message, cursor.history).asLeft
             }
           }

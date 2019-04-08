@@ -17,7 +17,7 @@ import java.util.UUID
 import java.time.Instant
 
 import cats.data.{EitherT, NonEmptyList, StateT}
-import cats.effect.{IO, Sync}
+import cats.effect.{IO, Sync, Clock}
 import cats.implicits._
 
 import com.snowplowanalytics.iglu.client.Resolver
@@ -31,7 +31,7 @@ import PureManifest._
   * IO in type-signature should be ignored as required only by `fs2.Stream#compile`
   * Use for tests only!
   */
-case class PureManifest(override val resolver: Resolver) extends ProcessingManifest[PureManifestEffect](resolver) with PureManifest.Impl {
+case class PureManifest(override val resolver: Resolver[PureManifestEffect]) extends ProcessingManifest[PureManifestEffect](resolver) with PureManifest.Impl {
 
   def apply(records: List[Record]): PureManifestEffect[List[Record]] =
     EitherT.right(StateT.set[IO, List[Record]](records)).map(_ => records)
@@ -63,16 +63,13 @@ case class PureManifest(override val resolver: Resolver) extends ProcessingManif
     } yield record
   }
 
-  def getItem(id: ItemId): PureManifestEffect[Option[Item]] = {
-    val itemS = for {
-      i <- getItemS(id)
-    } yield i match {
-      case Some(ii) => ii.ensure[Either[ManifestError, ?]](resolver).map(_.some)
-      case None => none[Item].asRight
-    }
-
-    EitherT[ManifestState[List[Record], ?], ManifestError, Option[Item]](itemS)
-  }
+  def getItem(id: ItemId): PureManifestEffect[Option[Item]] =
+    for {
+      item <- EitherT.liftF[ManifestState[List[Record], ?], ManifestError, Option[Item]](getItemS(id))
+      validated <- item match {
+        case Some(ii) => ii.ensure[PureManifestEffect](resolver).map(_.some)
+        case None => PureManifestEffect.lift(none[Item])
+      } } yield validated
 }
 
 object PureManifest {
@@ -86,6 +83,14 @@ object PureManifest {
   }
 
   type PureManifestEffect[A] = EitherT[ManifestState[List[Record], ?], ManifestError, A]
+
+  implicit val pureManifestClock: Clock[PureManifestEffect] =
+    Clock.create[PureManifestEffect]
+
+  object PureManifestEffect {
+    def lift[A](a: A): PureManifestEffect[A] =
+      EitherT.pure[ManifestState[List[Record], ?], ManifestError](a)
+  }
 
   trait Impl {
 

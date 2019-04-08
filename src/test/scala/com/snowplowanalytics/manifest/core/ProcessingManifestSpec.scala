@@ -413,7 +413,7 @@ class ProcessingManifestSpec extends Specification { def is = s2"""
 
     val idsForLoader = TestManifest.query(shredder.some, Application("rdb-loader", "0.13.0").some)
 
-    val newAppExpectation = TestManifest
+    val _ = TestManifest
       .getUnprocessed(idsForLoader, _ => true)
       .run(records) must beLeft(ManifestError.Locked(lockingRecord, None))
 

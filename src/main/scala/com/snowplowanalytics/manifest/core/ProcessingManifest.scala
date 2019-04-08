@@ -35,7 +35,7 @@ import ManifestError._
   * Base trait for processing manifest functionality
   * @tparam F effect producing by interaction with manifest
   */
-abstract class ProcessingManifest[F[_]](val resolver: Resolver)
+abstract class ProcessingManifest[F[_]](val resolver: Resolver[F])
                                        (implicit private[manifest] val F: ManifestAction[F]) {
   /** Add an atomic record to manifest */
   def put(itemId: ItemId,
@@ -95,7 +95,8 @@ abstract class ProcessingManifest[F[_]](val resolver: Resolver)
                      predicate: Item => Boolean)
                     (implicit S: Sync[F]): F[List[Item]] = {
 
-    val NotFoundError = ManifestError.invalidContent("Cannot find previously existing ItemId").raiseError[F, Item]
+
+    val NotFoundError = F.raiseError[Item](ManifestError.invalidContent("Cannot find previously existing ItemId"))
     val aggregated = itemIds
       .evalMap(getItem)
       .evalMap(_.fold(NotFoundError)(F.pure))
@@ -112,7 +113,7 @@ abstract class ProcessingManifest[F[_]](val resolver: Resolver)
     S.flatMap(aggregated.compile.toList) { Foldable[List].fold(_) match {
       case QueryResult(h :: t, _) =>
         val error: ManifestError = Locked(NonEmptyList(h, t), None)
-        error.raiseError[F, List[Item]]
+        F.raiseError[List[Item]](error)
       case QueryResult(_, toProcess) =>
         F.pure(toProcess)
     } }

@@ -33,6 +33,7 @@ import cats.effect._
 import fs2._
 
 import com.snowplowanalytics.iglu.client.Resolver
+import com.snowplowanalytics.iglu.client.resolver.registries.RegistryLookup
 import com.snowplowanalytics.iglu.core.circe.implicits._
 
 import core._
@@ -47,8 +48,10 @@ import Serialization._
   */
 class DynamoDbManifest[F[_]](val client: AmazonDynamoDB,
                              val primaryTable: String,
-                             resolver: Resolver)
-                            (implicit F: ManifestAction[F])
+                             resolver: Resolver[F])
+                            (implicit F: ManifestAction[F],
+                                      C: Clock[F],
+                                      L: RegistryLookup[F])
   extends ProcessingManifest[F](resolver) {
   import DynamoDbManifest._
 
@@ -202,9 +205,9 @@ object DynamoDbManifest {
 
   val DefaultThroughput = 10L
 
-  def apply[F[_]: ManifestAction](dynamodbClient: AmazonDynamoDB,
-                                  tableName: String,
-                                  resolver: Resolver): DynamoDbManifest[F] =
+  def apply[F[_]: ManifestAction: Clock: RegistryLookup](dynamodbClient: AmazonDynamoDB,
+                                                         tableName: String,
+                                                         resolver: Resolver[F]): DynamoDbManifest[F] =
     new DynamoDbManifest[F](dynamodbClient, tableName, resolver)
 
   /** Helper method to create manifest-compatible DynamoDB table */

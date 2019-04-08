@@ -12,14 +12,16 @@
  */
 package com.snowplowanalytics.manifest
 
+import cats.data._
+import cats.effect.{ Clock, IO }
+
+import io.circe.literal._
+
 import com.snowplowanalytics.iglu.client.Resolver
 
-import cats.data._
-
-import org.json4s.jackson.JsonMethods.parse
-
-import core.{ ManifestError, Item, Record }
 import pure.PureManifest
+import pure.PureManifest.PureManifestEffect
+import core.{Item, ManifestError, ManifestIO, Record}
 
 object SpecHelpers {
 
@@ -27,53 +29,64 @@ object SpecHelpers {
 
   type Action[A] = Either[ManifestError, A]
 
-  val igluCentralResolverConfig = parse(
+  val igluCentralResolverConfig = json"""
+      {
+        "schema": "iglu:com.snowplowanalytics.iglu/resolver-config/jsonschema/1-0-1",
+        "data": {
+          "cacheSize": 500,
+          "repositories": [
+            {
+              "name": "Iglu Central",
+              "priority": 0,
+              "vendorPrefixes": [ "com.snowplowanalytics" ],
+              "connection": {
+                "http": {
+                  "uri": "http://iglucentral.com"
+                }
+              }
+            }
+          ]
+        }
+      }
     """
-      |{
-      |  "schema": "iglu:com.snowplowanalytics.iglu/resolver-config/jsonschema/1-0-1",
-      |  "data": {
-      |    "cacheSize": 500,
-      |    "repositories": [
-      |      {
-      |        "name": "Iglu Central",
-      |        "priority": 0,
-      |        "vendorPrefixes": [ "com.snowplowanalytics" ],
-      |        "connection": {
-      |          "http": {
-      |            "uri": "http://iglucentral.com"
-      |          }
-      |        }
-      |      }
-      |    ]
-      |  }
-      |}
-    """.stripMargin)
 
-  val igluCentralResolver = Resolver.parse(igluCentralResolverConfig).toOption.get
+  val igluCentralResolver: PureManifestEffect[Resolver[PureManifestEffect]] =
+    Resolver.parse[PureManifestEffect](igluCentralResolverConfig).map(_.fold(throw _, identity))
 
-  val igluEmbeddedResolverConfig = parse(
-    """
-      |{
-      |  "schema": "iglu:com.snowplowanalytics.iglu/resolver-config/jsonschema/1-0-2",
-      |  "data": {
-      |    "cacheSize": 500,
-      |    "repositories": [
-      |      {
-      |        "name": "Manifest Embedded",
-      |        "priority": 0,
-      |        "vendorPrefixes": [ "com.snowplowanalytics" ],
-      |        "connection": {
-      |          "embedded": {
-      |            "path": "/com.snowplowanalytics.manifest/embedded-registry"
-      |          }
-      |        }
-      |      }
-      |    ]
-      |  }
-      |}
-    """.stripMargin)
+  val igluCentralResolverIO: Resolver[ManifestIO] =
+    Resolver.parse[ManifestIO](igluCentralResolverConfig).map(_.fold(throw _, identity))
+      .value.unsafeRunSync()
+      .fold(throw _, identity)
 
-  val igluEmbeddedResolver = Resolver.parse(igluEmbeddedResolverConfig).toOption.get
+
+  implicit class PureManifestEffectOps[A](effect: PureManifestEffect[A]) {
+    def runEffect: Action[A] =
+      effect.value.runA(Nil).unsafeRunSync()
+  }
+
+  val igluEmbeddedResolverConfig = json"""
+    {
+      "schema": "iglu:com.snowplowanalytics.iglu/resolver-config/jsonschema/1-0-2",
+      "data": {
+        "cacheSize": 500,
+        "repositories": [
+          {
+            "name": "Manifest Embedded",
+            "priority": 0,
+            "vendorPrefixes": [ "com.snowplowanalytics" ],
+            "connection": {
+              "embedded": {
+                "path": "/com.snowplowanalytics.manifest/embedded-registry"
+              }
+            }
+          }
+        ]
+      }
+    }
+  """
+
+  val igluEmbeddedResolver: Resolver[PureManifestEffect] =
+    Resolver.parse[PureManifestEffect](igluEmbeddedResolverConfig).map(_.fold(throw _, identity)).value.runA(Nil).unsafeRunSync().fold(throw _, identity)
 
   object TestManifest extends PureManifest(igluEmbeddedResolver)
 

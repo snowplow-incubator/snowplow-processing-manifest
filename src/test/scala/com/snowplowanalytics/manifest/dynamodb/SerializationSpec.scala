@@ -22,7 +22,7 @@ import io.circe.Json
 
 import com.amazonaws.services.dynamodbv2.model.AttributeValue
 
-import com.snowplowanalytics.iglu.core.{ SelfDescribingData, SchemaKey }
+import com.snowplowanalytics.iglu.core.{SchemaKey, SchemaVer, SelfDescribingData}
 
 import org.specs2.Specification
 
@@ -50,7 +50,7 @@ class SerializationSpec extends Specification { def is = s2"""
     ).asJava
 
     val expectedPayload = Some(SelfDescribingData[Json](
-      SchemaKey.fromUri("iglu:com.acme/event/jsonschema/1-0-0").get,
+      SchemaKey("com.acme", "event", "jsonschema", SchemaVer.Full(1,0,0)),
       Json.fromFields(List.empty))
     )
     val expected = Record(
