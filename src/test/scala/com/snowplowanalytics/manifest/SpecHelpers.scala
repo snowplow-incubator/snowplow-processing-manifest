@@ -25,7 +25,7 @@ import core.{Item, ManifestError, ManifestIO, Record}
 
 object SpecHelpers {
 
-  val AssetVersion: String = "0.2.0"
+  val AssetVersion: String = "0.2.0-M2"
 
   type Action[A] = Either[ManifestError, A]
 
